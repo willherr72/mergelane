@@ -10,10 +10,11 @@ await mkdir(artifacts, { recursive: true });
 const profile = path.resolve(artifacts, `smoke-profile-${Date.now()}`);
 const extension = path.join(root, 'dist');
 const checks = [], errors = [];
-const context = await chromium.launchPersistentContext(profile, {
+const launch = () => chromium.launchPersistentContext(profile, {
   channel: 'chromium', headless: true, viewport: { width: 1100, height: 900 },
   args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
 });
+let context = await launch();
 context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
 await context.route('https://github.com/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Fixture PR</title><p>Isolated MergeLane smoke test. No live GitHub data.</p>' }));
 let worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
@@ -27,7 +28,10 @@ async function installFixtures(data) {
       const url = new URL(String(input));
       const json = value => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } });
       if (url.origin !== 'https://api.github.com') throw new Error('Unexpected test request');
-      if (url.pathname === '/user') return json({ login: 'fixture-user' });
+      if (url.pathname === '/user') {
+        if (globalThis.__blockAccount) { globalThis.__accountWaiting = true; await new Promise(resolve => { globalThis.__releaseAccount = resolve; }); }
+        return json({ login: 'fixture-user' });
+      }
       if (new Headers(init?.headers).get('Authorization') === 'Bearer wrong-owner-fixture') return new Response('', { status: 404 });
       const match = url.pathname.match(/\/(pulls|issues)\/(\d+)(.*)$/);
       if (!match) throw new Error('Unexpected fixture path');
@@ -47,7 +51,7 @@ async function installFixtures(data) {
 
 try {
   await installFixtures(fixtures);
-  const options = await context.newPage();
+  let options = await context.newPage();
   await options.goto(`chrome-extension://${id}/options.html`);
   await options.getByLabel('Name', { exact: true }).waitFor();
   const send = (type, data = {}) => options.evaluate(async ({ type, data }) => {
@@ -68,31 +72,42 @@ try {
   assert.equal(initial.settings.enabled, false); assert.equal(initial.hasToken, false);
   assert.equal(initial.settings.token, ''); checks.push('Fresh install is paused and public state omits the credential.');
 
+  await options.getByRole('button', { name: 'Add connection', exact: true }).click();
+  assert.equal(await options.getByLabel('Resource owner', { exact: true }).inputValue(), '');
+  await options.getByLabel('Resource owner', { exact: true }).fill('org');
   await options.getByLabel('Personal access token', { exact: true }).fill('fixture-token-not-a-real-secret');
-  await options.getByRole('button', { name: 'Connect GitHub', exact: true }).last().click();
+  await options.getByRole('button', { name: 'Save connection', exact: true }).click();
   await options.locator('#connectionResult').filter({ hasText: 'Repository access has not been tested' }).waitFor();
-  assert.equal(await options.getByLabel('Personal access token', { exact: true }).inputValue(), '');
+  assert.equal(await options.getByLabel('Personal access token', { exact: true }).count(), 0);
+  await options.locator('[data-owner="org"]').filter({ hasText: 'Account verified · repository access untested' }).waitFor();
   const probe = await context.newPage(); await probe.goto('https://github.com/org/repo/pull/1');
   await waitForTabs(); await options.reload();
-  await options.getByLabel('1. Resource owner', { exact: true }).waitFor();
-  assert.equal(await options.getByLabel('1. Resource owner', { exact: true }).inputValue(), 'org');
+  await options.getByRole('button', { name: 'Add connection', exact: true }).click();
+  assert.equal(await options.getByLabel('Resource owner', { exact: true }).inputValue(), '');
+  await options.getByLabel('Resource owner', { exact: true }).fill('ORG');
+  assert.equal(await options.getByRole('button', { name: 'Save connection', exact: true }).isDisabled(), true);
+  await options.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await options.getByRole('button', { name: 'Replace org token', exact: true }).click();
+  assert.equal(await options.getByLabel('Resource owner', { exact: true }).inputValue(), 'org');
+  assert.equal(await options.getByLabel('Resource owner', { exact: true }).getAttribute('readonly'), '');
   const tokenLink = new URL(await options.getByRole('link', { name: 'Create token for org', exact: true }).getAttribute('href'));
   assert.equal(tokenLink.searchParams.get('target_name'), 'org');
   assert.equal(tokenLink.searchParams.get('pull_requests'), 'read');
   assert.equal(tokenLink.searchParams.get('issues'), 'read');
   await options.getByLabel('Personal access token', { exact: true }).fill('wrong-owner-fixture');
-  await options.getByRole('button', { name: 'Update token', exact: true }).click();
+  await options.getByRole('button', { name: 'Replace token', exact: true }).click();
   await options.locator('#connectionResult').filter({ hasText: 'Resource owner to org' }).waitFor();
-  assert.equal(await worker.evaluate(async () => (await chrome.storage.local.get('settings')).settings.token === 'fixture-token-not-a-real-secret'), true);
+  assert.equal(await worker.evaluate(async () => (await chrome.storage.local.get('settings')).settings.connections.find(c => c.owner === 'org').token === 'fixture-token-not-a-real-secret'), true);
   assert.equal((await send('getState')).settings.enabled, false);
   assert.equal(await options.getByLabel('Personal access token', { exact: true }).inputValue(), 'wrong-owner-fixture');
   await options.getByLabel('Personal access token', { exact: true }).fill('fixture-token-not-a-real-secret');
-  await options.getByRole('button', { name: 'Update token', exact: true }).click();
+  await options.getByRole('button', { name: 'Replace token', exact: true }).click();
   await options.locator('#connectionResult').filter({ hasText: 'Access verified for 1 PR under org' }).waitFor();
-  await options.getByRole('button', { name: 'Check access', exact: true }).click();
+  await options.getByRole('button', { name: 'Check org connection', exact: true }).click();
   await options.locator('#toast').filter({ hasText: 'Access verified for 1 PR under org' }).waitFor();
   await probe.close();
   checks.push('Owner-prefilled setup rejects a valid account token without repository access, preserves the previous token, and verifies PR access on retry.');
+  checks.push('Add connection starts blank, rejects duplicate owners, and Replace token locks the saved owner with accurate connection health.');
   await options.getByRole('button', { name: 'Enable MergeLane', exact: true }).click();
   await options.locator('#toast').filter({ hasText: 'Settings saved' }).waitFor();
   checks.push('Token setup validates the account, clears the input, and requires explicit enable.');
@@ -146,7 +161,7 @@ try {
   await options.getByRole('button', { name: 'Edit Changes requested', exact: true }).waitFor();
   checks.push('A user-defined changes-requested category survives reload and groups matching PRs.');
 
-  const popup = await context.newPage(); await popup.goto(`chrome-extension://${id}/popup.html`);
+  let popup = await context.newPage(); await popup.goto(`chrome-extension://${id}/popup.html`);
   await popup.getByRole('button', { name: 'Pause', exact: true }).click();
   await popup.getByRole('button', { name: 'Enable MergeLane', exact: true }).waitFor();
   await worker.evaluate(() => chrome.tabs.create({ url: 'https://github.com/org/repo/pull/5', active: false }));
@@ -193,7 +208,7 @@ try {
   await options.getByRole('button', { name: 'Pause', exact: true }).click();
   await options.locator('#toast').filter({ hasText: 'MergeLane is paused' }).waitFor();
   assert.equal((await send('getState')).settings.enabled, false);
-  await options.getByRole('button', { name: 'Disconnect', exact: true }).click();
+  await options.getByRole('button', { name: 'Disconnect all', exact: true }).click();
   await options.locator('#toast').filter({ hasText: 'Disconnected' }).waitFor();
   assert.equal((await send('getState')).hasToken, false);
   checks.push('Pause and Disconnect work even with an unfinished, invalid rule draft.');
@@ -201,8 +216,10 @@ try {
   // Discard the unfinished edit and restore a connected, active screenshot.
   options.once('dialog', dialog => dialog.accept());
   await options.reload();
+  await options.getByRole('button', { name: 'Add connection', exact: true }).click();
+  await options.getByLabel('Resource owner', { exact: true }).fill('org');
   await options.getByLabel('Personal access token', { exact: true }).fill('fixture-token-not-a-real-secret');
-  await options.getByRole('button', { name: 'Connect GitHub', exact: true }).last().click();
+  await options.getByRole('button', { name: 'Save connection', exact: true }).click();
   await options.locator('#toast').filter({ hasText: 'Access verified' }).waitFor();
   await options.getByRole('button', { name: 'Enable MergeLane', exact: true }).click();
   await options.locator('#toast').filter({ hasText: 'Settings saved' }).waitFor();
@@ -212,10 +229,54 @@ try {
   await options.locator('#toast').filter({ hasText: 'Settings saved' }).waitFor();
   await send('refresh');
 
+  await popup.reload();
+  await popup.locator('[data-pr="org/repo/2"]').filter({ hasText: 'Another person commented or reviewed' }).waitFor();
+  await popup.locator('[data-pr="org/repo/4"]').filter({ hasText: 'Has label “queue-next”' }).waitFor();
+  checks.push('Popup explanations show the matching human-feedback and configured queue-label rules beside each PR.');
+  const staleBeforeProtection = (await send('getState')).settings;
+  const waitWorker = async predicate => {
+    const until = Date.now() + 15000;
+    while (!await worker.evaluate(predicate)) { if (Date.now() > until) throw new Error('Timed out waiting for the fixture interleaving'); await new Promise(resolve => setTimeout(resolve, 30)); }
+  };
+  await worker.evaluate(async () => {
+    globalThis.__blockAccount = true;
+    const target = (await chrome.tabs.query({})).filter(t => t.url === 'https://github.com/org/repo/pull/2');
+    const ids = new Set(target.map(t => t.id)), groups = new Set(target.map(t => t.groupId));
+    const remove = chrome.tabs.remove.bind(chrome.tabs), update = chrome.tabGroups.update.bind(chrome.tabGroups);
+    chrome.tabs.remove = async value => { const result = await remove(value); if ((Array.isArray(value) ? value : [value]).some(id => ids.has(id))) globalThis.__handledProtectedPr = true; return result; };
+    chrome.tabGroups.update = async (id, patch) => { const result = await update(id, patch); if (groups.has(id)) globalThis.__handledProtectedPr = true; return result; };
+  });
+  const accountCheck = send('checkConnection', { owner: 'org' });
+  await waitWorker(() => !!globalThis.__accountWaiting);
+  const protection = send('keepOpen', { key: 'org/repo/2' }).then(value => ({ value }), error => ({ error: String(error) }));
+  await send('getState');
+  await worker.evaluate(() => { globalThis.__fixture.merged[2] = true; });
+  const whileBlocked = send('refresh');
+  await waitWorker(() => !!globalThis.__handledProtectedPr);
+  const presentWhileBlocked = (await worker.evaluate(() => chrome.tabs.query({}))).some(t => t.url === 'https://github.com/org/repo/pull/2');
+  await worker.evaluate(() => { globalThis.__blockAccount = false; globalThis.__releaseAccount(); });
+  await accountCheck; const protectedResult = await protection; await whileBlocked;
+  assert.equal(protectedResult.error, undefined); assert.equal(presentWhileBlocked, true);
+  checks.push('Keep open takes effect immediately while a slow credential check holds the command queue.');
+  await send('saveSettings', { settings: staleBeforeProtection }); await send('refresh');
+  assert.equal((await worker.evaluate(() => chrome.tabs.query({}))).some(t => t.url === 'https://github.com/org/repo/pull/2'), true);
+  assert.equal((await send('getState')).cleanup.kept.some(pr => pr.key === 'org/repo/2'), true);
+  checks.push('Keep open protects all tabs for a PR after merge, and stale category saves cannot undo protection.');
+  await popup.getByRole('button', { name: 'Show recently closed PRs', exact: true }).click();
+  for (const number of [5, 6]) {
+    await popup.getByRole('button', { name: `Reopen and keep open org/repo/${number}`, exact: true }).click();
+    await waitForTabs(); await send('refresh');
+    assert.equal((await worker.evaluate(() => chrome.tabs.query({}))).some(t => t.url === `https://github.com/org/repo/pull/${number}`), true);
+  }
+  checks.push('Recent closures restore both merged and old-closed PRs with protection before creation, so subsequent checks leave them open.');
+
   await options.getByRole('button', { name: 'Edit Queued', exact: true }).click();
   await options.screenshot({ path: path.join(artifacts, 'settings.png'), fullPage: true });
   await popup.reload(); await popup.getByRole('button', { name: 'Pause', exact: true }).waitFor();
+  await popup.setViewportSize({ width: 360, height: 600 });
   await popup.screenshot({ path: path.join(artifacts, 'popup.png'), fullPage: true });
+  await popup.getByRole('button', { name: 'Show recently closed PRs', exact: true }).click();
+  await popup.screenshot({ path: path.join(artifacts, 'popup-cleanup.png'), fullPage: true });
   await options.setViewportSize({ width: 390, height: 900 });
   await options.screenshot({ path: path.join(artifacts, 'settings-narrow.png'), fullPage: true });
   const overflow = await options.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, elements: [...document.querySelectorAll('body *')].filter(e => e.getBoundingClientRect().right > innerWidth).map(e => ({ tag: e.tagName, className: e.className, right: e.getBoundingClientRect().right })).slice(0, 12) }));
@@ -224,6 +285,35 @@ try {
   assert.deepEqual(errors, []);
   checks.push('Options and popup load without page errors; narrow options layout has no horizontal overflow.');
   const final = await send('getState'); assert.deepEqual(final.status.errors, []);
+
+  const restartFixtures = await worker.evaluate(() => globalThis.__fixture);
+  await send('setEnabled', { enabled: false }); await send('refresh');
+  await context.close();
+  context = await launch();
+  context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
+  await context.route('https://github.com/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Fixture PR</title><p>Restored fixture</p>' }));
+  worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
+  await installFixtures(restartFixtures);
+  options = await context.newPage(); await options.goto(`chrome-extension://${id}/options.html`);
+  const restored = await send('getState');
+  assert.deepEqual(restored.cleanup.kept.map(pr => pr.key).sort(), ['org/repo/2', 'org/repo/5', 'org/repo/6']);
+  assert.ok(restored.cleanup.recent.some(pr => pr.key === 'org/repo/5'));
+  await send('reopenClosed', { key: 'org/repo/5' }); await waitForTabs();
+  await send('setEnabled', { enabled: true }); await send('refresh');
+  assert.equal((await worker.evaluate(() => chrome.tabs.query({}))).some(t => t.url === 'https://github.com/org/repo/pull/5'), true);
+  checks.push('A full browser restart preserves cleanup protections and recent history, and restored protection still prevents closure.');
+  popup = await context.newPage(); await popup.goto(`chrome-extension://${id}/popup.html`);
+  await popup.getByRole('button', { name: 'Show kept-open PRs', exact: true }).click();
+  await popup.getByRole('button', { name: 'Resume cleanup for org/repo/5', exact: true }).click();
+  await send('refresh');
+  assert.equal((await worker.evaluate(() => chrome.tabs.query({}))).some(t => t.url === 'https://github.com/org/repo/pull/5'), false);
+  await popup.getByRole('button', { name: 'Show recently closed PRs', exact: true }).click();
+  await popup.getByRole('button', { name: 'Clear history', exact: true }).click();
+  const cleaned = await send('getState');
+  assert.deepEqual(cleaned.cleanup.recent, []);
+  assert.deepEqual(cleaned.cleanup.kept.map(pr => pr.key).sort(), ['org/repo/2', 'org/repo/6']);
+  assert.deepEqual(errors, []);
+  checks.push('Resume cleanup restores automatic closure; clearing recent history preserves unrelated protections.');
   await writeFile(path.join(artifacts, 'smoke-report.json'), JSON.stringify({ passed: true, environment: 'Isolated headless Chromium; native extension APIs; fixture GitHub responses; no real credentials or user tabs', checks }, null, 2));
   console.log(checks.map((line, i) => `${i + 1}. PASS ${line}`).join('\n'));
 } catch (error) {

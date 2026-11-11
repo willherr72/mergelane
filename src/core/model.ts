@@ -14,6 +14,7 @@ export interface Review extends Comment { id: number; state: string; submitted_a
 export interface Snapshot { details: PrDetails; comments: Comment[]; reviewComments: Comment[]; reviews: Review[] }
 export interface Facts { labels: string[]; feedback: boolean; approval: boolean; changes: boolean; draft: boolean }
 export interface Ownership { groups: Record<string, number>; tabs: Record<string, { key: string; categoryId: string }> }
-export interface RunStatus { checkedAt: number | null; attemptedAt: number | null; counts: Record<string, number>; errors: { pr: string; message: string }[]; tracked: number; closed: number; retryAt: number | null; running: boolean }
+export interface TrackedPr { key: string; url: string; title: string; categoryId: string | null; explanation: string; checkedAt: number | null }
+export interface RunStatus { checkedAt: number | null; attemptedAt: number | null; counts: Record<string, number>; errors: { pr: string; message: string }[]; tracked: number; closed: number; retryAt: number | null; running: boolean; prs: TrackedPr[]; owners: string[] }
 export const emptyOwnership = (): Ownership => ({ groups: {}, tabs: {} });
-export const emptyStatus = (): RunStatus => ({ checkedAt: null, attemptedAt: null, counts: {}, errors: [], tracked: 0, closed: 0, retryAt: null, running: false });
+export const emptyStatus = (): RunStatus => ({ checkedAt: null, attemptedAt: null, counts: {}, errors: [], tracked: 0, closed: 0, retryAt: null, running: false, prs: [], owners: [] });

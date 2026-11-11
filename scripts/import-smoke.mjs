@@ -61,11 +61,15 @@ try {
   const send = (type, data = {}) => options.evaluate(async ({ type, data }) => {
     const reply = await chrome.runtime.sendMessage({ type, ...data }); if (!reply.ok) throw new Error(reply.error); return reply.data;
   }, { type, data });
-  await options.getByLabel('Personal access token', { exact: true }).waitFor();
+  await options.getByRole('button', { name: 'Add connection', exact: true }).waitFor();
   for (const owner of ['org-a', 'org-b']) { const pr = await context.newPage(); await pr.goto(`https://github.com/${owner}/repo/pull/1`); }
   await options.reload();
   async function start(owner) {
-    await options.getByLabel('1. Resource owner', { exact: true }).fill(owner);
+    await options.getByRole('button', { name: 'Add connection', exact: true }).click();
+    assert.equal(await options.getByLabel('Resource owner', { exact: true }).inputValue(), '');
+    const suggestion = options.getByRole('button', { name: `Use detected owner ${owner}`, exact: true });
+    if (await suggestion.count()) await suggestion.click();
+    else await options.getByLabel('Resource owner', { exact: true }).fill(owner);
     const created = context.waitForEvent('page', { predicate: async page => {
       try {
         await page.waitForURL(url => url.origin === 'https://github.com' && url.pathname === '/settings/personal-access-tokens/new' && url.searchParams.get('target_name') === owner);
@@ -122,6 +126,16 @@ try {
   await b.getByRole('button', { name: 'Imported', exact: true }).waitFor();
   assert.deepEqual((await send('getState')).settings.connections.map(c => c.owner), ['org-a', 'org-b']);
   checks.push('Failed owner verification preserves existing connections and allows a successful explicit retry.');
+
+  await send('setToken', { owner: '', token: tokenFor('org-a') });
+  assert.equal((await send('checkConnection', { owner: '' })).connectionCheck.checked, 0);
+  await send('removeConnection', { owner: 'org-a' });
+  assert.equal((await send('checkConnection', { owner: '' })).connectionCheck.checked, 1);
+  await assert.rejects(send('setToken', { owner: 'org-a', token: tokenFor('org-a'), mode: 'replace' }), /removed/);
+  await send('setToken', { owner: 'org-a', token: tokenFor('org-a'), mode: 'add' });
+  await assert.rejects(send('setToken', { owner: 'ORG-A', token: tokenFor('org-b'), mode: 'add' }), /already/);
+  await send('removeConnection', { owner: '' });
+  checks.push('Default checks exclude explicitly connected owners; stale Replace and duplicate Add requests cannot recreate or overwrite connections.');
 
   await send('setEnabled', { enabled: true }); await send('refresh');
   let groups = await worker.evaluate(() => chrome.tabGroups.query({}));

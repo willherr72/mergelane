@@ -1,4 +1,4 @@
-export interface ImportSession { tabId: number; owner: string; expiresAt: number }
+export interface ImportSession { tabId: number; owner: string; expiresAt: number; mode?: 'add' | 'replace' }
 export const IMPORT_LIFETIME = 30 * 60 * 1000;
 
 export function tokenSettingsUrl(value: string | undefined): boolean {

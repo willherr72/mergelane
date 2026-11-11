@@ -1,7 +1,10 @@
-import type { PrRef } from '../core/model';
+import type { PrRef, Settings } from '../core/model';
 import type { GitHubClient } from './client';
 
 export interface ConnectionCheck { login: string; owner: string; checked: number }
+export function verificationRefs(refs: PrRef[], settings: Settings, owner: string): PrRef[] {
+  return owner ? refs.filter(ref => ref.owner.toLowerCase() === owner.toLowerCase()) : refs.filter(ref => !settings.connections.some(c => c.owner.toLowerCase() === ref.owner.toLowerCase()));
+}
 
 export function tokenCreationUrl(owner: string): string {
   const url = new URL('https://github.com/settings/personal-access-tokens/new');

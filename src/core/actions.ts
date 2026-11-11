@@ -23,6 +23,10 @@ export function applySettingsAction(current: Settings, action: Record<string, un
     case 'setToken': {
       if (typeof action.token !== 'string' || !action.token.trim() || action.token.length > 1000) throw new Error('Enter a valid GitHub token.');
       const owner = typeof action.owner === 'string' ? action.owner.trim() : '';
+      const exists = owner ? current.connections.some(c => c.owner.toLowerCase() === owner.toLowerCase()) : !!current.token;
+      if (action.mode === 'add' && !owner) throw new Error('Enter the organization or account to connect.');
+      if (action.mode === 'add' && exists) throw new Error('This owner already has a connection. Choose Replace token on its saved connection.');
+      if (action.mode === 'replace' && !exists) throw new Error('This connection was removed. Use Add connection to connect it again.');
       if (!owner) return { ...current, token: action.token.trim() };
       const connection = { owner, token: action.token.trim() };
       const connections = [...current.connections];

@@ -1,4 +1,4 @@
-import type { Actor, Facts, PrDetails, Settings, Snapshot } from './model';
+import type { Actor, Category, Condition, Facts, PrDetails, Settings, Snapshot } from './model';
 
 export function deriveFacts(snapshot: Snapshot, ignoredLogins: string[]): Facts {
   const ignored = new Set(ignoredLogins.map(s => s.toLowerCase()));
@@ -15,15 +15,30 @@ export function deriveFacts(snapshot: Snapshot, ignoredLogins: string[]): Facts 
   };
 }
 
+function matches(rule: Condition, facts: Facts): boolean {
+  const result = rule.kind === 'label' ? facts.labels.some(l => l.toLowerCase() === rule.value!.toLowerCase()) : facts[rule.kind];
+  return rule.negate ? !result : result;
+}
+export function explainCategory(category: Category, facts: Facts): string {
+  if (category.fallback) return 'No enabled rule matched; using the fallback lane.';
+  const descriptions = category.conditions.filter(rule => matches(rule, facts)).map(rule => {
+    if (rule.kind === 'label') return `${rule.negate ? 'Does not have' : 'Has'} label “${rule.value}”`;
+    const labels = {
+      feedback: ['Another person commented or reviewed', 'No feedback from another person'],
+      approval: ['Active human approval, with no outstanding changes requested', 'No qualifying active human approval'],
+      changes: ['Has outstanding changes requested', 'No outstanding changes requested'],
+      draft: ['Is a draft', 'Not a draft'],
+    };
+    return labels[rule.kind][rule.negate ? 1 : 0];
+  });
+  return descriptions.length ? descriptions.join('; ') + '.' : 'Waiting for the next check.';
+}
 export function classify(facts: Facts, settings: Settings): string {
   for (const id of settings.priority) {
     const category = settings.categories.find(c => c.id === id);
     if (!category?.enabled || category.fallback) continue;
-    const matches = category.conditions.map(rule => {
-      const result = rule.kind === 'label' ? facts.labels.some(l => l.toLowerCase() === rule.value!.toLowerCase()) : facts[rule.kind];
-      return rule.negate ? !result : result;
-    });
-    if (matches.length && (category.mode === 'all' ? matches.every(Boolean) : matches.some(Boolean))) return id;
+    const results = category.conditions.map(rule => matches(rule, facts));
+    if (results.length && (category.mode === 'all' ? results.every(Boolean) : results.some(Boolean))) return id;
   }
   return settings.categories.find(c => c.fallback)!.id;
 }

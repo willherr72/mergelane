@@ -1,4 +1,5 @@
-import { classify, deriveFacts, shouldClose } from '../core/classify';
+import { classify, deriveFacts, explainCategory, shouldClose } from '../core/classify';
+import { canonicalPr, type ClosedPr } from '../core/cleanup';
 import { parsePrUrl } from '../core/url';
 import { emptyStatus, hasCredentials, type Ownership, type PrDetails, type PrRef, type RunStatus, type Settings, type Snapshot } from '../core/model';
 import { ApiError } from '../github/client';
@@ -10,6 +11,8 @@ export interface ReconcileDeps {
   api: { snapshot(ref: PrRef): Promise<Snapshot>; details(ref: PrRef, fresh: boolean): Promise<PrDetails> };
   isCurrent(): boolean;
   now(): number;
+  keptKeys?: Set<string>;
+  onClosed?(pr: ClosedPr): Promise<void>;
 }
 
 export async function reconcile(deps: ReconcileDeps): Promise<RunStatus> {
@@ -27,6 +30,12 @@ export async function reconcile(deps: ReconcileDeps): Promise<RunStatus> {
     if (!jobs.has(ref.key)) jobs.set(ref.key, { ref, tabs: [] });
     jobs.get(ref.key)!.tabs.push(tab);
     status.tracked++;
+  }
+  status.owners = [...new Set([...jobs.values()].map(job => job.ref.owner.toLowerCase()))];
+  function observe(key: string, title: string, categoryId: string | null, explanation: string, checked = true): void {
+    const ref = jobs.get(key)!.ref;
+    status.prs = status.prs.filter(pr => pr.key !== key);
+    status.prs.push({ ...canonicalPr(`https://github.com/${ref.owner}/${ref.repo}/pull/${ref.number}`, title), categoryId, explanation, checkedAt: checked ? now() : null });
   }
   // Forget IDs that disappeared or navigated to another resource. Session
   // storage prevents IDs from a prior browser session being mistaken for ours.
@@ -63,6 +72,7 @@ export async function reconcile(deps: ReconcileDeps): Promise<RunStatus> {
   function recordError(key: string, error: unknown): void {
     status.errors.push({ pr: key, message: error instanceof ApiError ? error.message : 'Could not complete this PR check. Its tabs have been left in place.' });
     if (error instanceof ApiError && error.retryAt) status.retryAt = Math.max(status.retryAt ?? 0, error.retryAt);
+    observe(key, '', null, 'Could not check this PR. Its previous group is left in place.', false);
   }
   async function liveTab(tab: chrome.tabs.Tab, key: string): Promise<chrome.tabs.Tab | null> {
     if (!isCurrent()) return null;
@@ -111,7 +121,8 @@ export async function reconcile(deps: ReconcileDeps): Promise<RunStatus> {
     }
     try {
       let detail = result.snapshot.details;
-      if (shouldClose(detail, now())) {
+      const kept = deps.keptKeys?.has(key) ?? false;
+      if (!kept && shouldClose(detail, now())) {
         detail = await api.details(job.ref, true);
         if (!isCurrent()) break;
         if (shouldClose(detail, now())) {
@@ -120,6 +131,7 @@ export async function reconcile(deps: ReconcileDeps): Promise<RunStatus> {
             await browser.tabs.remove(tab.id!);
             delete ownership.tabs[String(tab.id)];
             status.closed++;
+            await deps.onClosed?.({ ...canonicalPr(`https://github.com/${job.ref.owner}/${job.ref.repo}/pull/${job.ref.number}`, detail.title ?? ''), closedAt: now(), reason: detail.merged ? 'merged' : 'closed' });
           }
           continue;
         }
@@ -129,13 +141,19 @@ export async function reconcile(deps: ReconcileDeps): Promise<RunStatus> {
           const categoryId = ownership.tabs[String(tab.id)]?.categoryId ?? fallback.id;
           if (await place(tab, key, categoryId)) status.counts[categoryId] = (status.counts[categoryId] ?? 0) + 1;
         }
+        observe(key, detail.title ?? '', null, 'PR changed during this check. Previous group retained until the next check.');
         continue;
       }
-      const openCategory = detail.state === 'open' ? classify(deriveFacts(result.snapshot, settings.ignoredLogins), settings) : null;
+      const facts = deriveFacts(result.snapshot, settings.ignoredLogins);
+      const openCategory = detail.state === 'open' ? classify(facts, settings) : null;
       for (const tab of job.tabs) {
         const previous = ownership.tabs[String(tab.id)]?.categoryId;
         const categoryId = openCategory ?? (settings.categories.some(c => c.id === previous && c.enabled) ? previous! : fallback.id);
         if (await place(tab, key, categoryId)) status.counts[categoryId] = (status.counts[categoryId] ?? 0) + 1;
+        const category = settings.categories.find(c => c.id === categoryId)!;
+        const closedAt = detail.closed_at ? Date.parse(detail.closed_at) : NaN;
+        const waiting = Number.isFinite(closedAt) && now() >= closedAt && now() - closedAt <= 3600000 ? 'Closed PR within its one-hour grace period; previous lane retained.' : 'Closed PR without a usable closure time; automatic cleanup is waiting.';
+        observe(key, detail.title ?? '', categoryId, openCategory ? explainCategory(category, facts) : kept ? `${detail.merged ? 'Merged' : 'Closed'} PR — kept open at your request.` : waiting);
       }
     } catch (error) { recordError(key, error); }
   }
@@ -166,5 +184,6 @@ export async function reconcile(deps: ReconcileDeps): Promise<RunStatus> {
     } catch { /* A tab/window may disappear during reordering; retry next run. */ }
   }
   if (isCurrent() && !status.errors.length) status.checkedAt = now();
+  status.tracked -= status.closed;
   return status;
 }

@@ -1,8 +1,11 @@
 import { applySettingsAction } from '../core/actions';
 import { emptyStatus, hasCredentials } from '../core/model';
 import { ApiError, GitHubClient, emptyCache } from '../github/client';
-import { initializeStorage, openPullRequests, publicState, readRunState, readSettings } from '../storage';
-import { verifyConnection, type ConnectionCheck } from '../github/connection';
+import { initializeStorage, openPullRequests, publicState, readCleanup, readHealth, readRunState, readSettings } from '../storage';
+import { addClosure, canonicalPr, setProtection } from '../core/cleanup';
+import { healthFromRun, putHealth } from '../core/health';
+import { parsePrUrl } from '../core/url';
+import { verificationRefs, verifyConnection, type ConnectionCheck } from '../github/connection';
 import { reconcile } from './reconcile';
 import { OwnerClient } from '../github/owners';
 import { beginImport, cancelImports, importSession, requireImportSession } from './token-import';
@@ -13,6 +16,7 @@ let rerun = false;
 let running: Promise<void> | null = null;
 let debounce: ReturnType<typeof setTimeout> | undefined;
 let saveQueue: Promise<unknown> = Promise.resolve();
+const pendingKept = new Map<string, number>();
 function queued<T>(action: () => Promise<T>): Promise<T> {
   const task = saveQueue.then(action); saveQueue = task.catch(() => {}); return task;
 }
@@ -36,12 +40,16 @@ async function runOnce(): Promise<void> {
   }
   await chrome.storage.local.set({ status: { ...state.status, running: true } });
   const client = new OwnerClient(settings, state.caches);
-  const result = await reconcile({ chrome, settings, ownership: state.ownership, api: client, now: Date.now, isCurrent: () => ticket === epoch });
+  const cleanup = await readCleanup();
+  const result = await reconcile({ chrome, settings, ownership: state.ownership, api: client, now: Date.now, isCurrent: () => ticket === epoch, keptKeys: new Set([...cleanup.kept.map(pr => pr.key), ...pendingKept.keys()]), onClosed: pr => queued(async () => { await chrome.storage.local.set({ cleanup: addClosure(await readCleanup(), pr) }); }) });
   // Ownership describes actual browser mutations, even if settings changed
   // after some of those mutations. Preserve it for the next reconciliation.
   await chrome.storage.session.set({ ownership: state.ownership });
   if (ticket !== epoch) { rerun = true; return; }
-  await chrome.storage.local.set({ connectionCaches: client.exportCaches(), status: { ...result, checkedAt: result.checkedAt ?? state.status.checkedAt, running: false } });
+  await queued(async () => {
+    if (ticket !== epoch) { rerun = true; return; }
+    await chrome.storage.local.set({ connectionCaches: client.exportCaches(), connectionHealth: healthFromRun(await readHealth(), settings, result, Date.now()), status: { ...result, checkedAt: result.checkedAt ?? state.status.checkedAt, running: false } });
+  });
 }
 
 function requestRun(): Promise<void> {
@@ -84,7 +92,35 @@ async function handleMessage(message: unknown): Promise<unknown> {
   const request = message as Record<string, unknown>;
   if (request.type === 'getState') return publicState();
   if (request.type === 'refresh') { await requestRun(); return publicState(); }
-  if (request.type === 'beginImport') return queued(async () => { await beginImport(typeof request.owner === 'string' ? request.owner.trim() : ''); return publicState(); });
+  if (['keepOpen', 'resumeCleanup', 'reopenClosed', 'clearRecent'].includes(String(request.type))) {
+    // Protection takes effect on receipt, even while a slow credential check
+    // holds the command queue. Every new reconciliation sees pending keys.
+    const pendingKey = ['keepOpen', 'reopenClosed'].includes(String(request.type)) && typeof request.key === 'string' ? request.key : null;
+    if (pendingKey) { pendingKept.set(pendingKey, (pendingKept.get(pendingKey) ?? 0) + 1); epoch++; }
+    return queued(async () => {
+    const cleanup = await readCleanup();
+    if (request.type === 'clearRecent') { await chrome.storage.local.set({ cleanup: { ...cleanup, recent: [] } }); return publicState(); }
+    if (typeof request.key !== 'string') throw new Error('Choose a tracked PR.');
+    const key = request.key;
+    let pr = request.type === 'reopenClosed' ? cleanup.recent.find(pr => pr.key === key) : cleanup.kept.find(pr => pr.key === key);
+    if (request.type === 'keepOpen') {
+      const ref = (await openPullRequests()).find(ref => ref.key === key);
+      if (ref) pr = canonicalPr(`https://github.com/${ref.owner}/${ref.repo}/pull/${ref.number}`, (await readRunState()).status.prs.find(pr => pr.key === key)?.title ?? '');
+    }
+    if (!pr || canonicalPr(pr.url, pr.title).key !== key) throw new Error('This PR is no longer in the requested list. Refresh and try again.');
+    epoch++;
+    await chrome.storage.local.set({ cleanup: setProtection(cleanup, pr, request.type !== 'resumeCleanup') });
+    if (request.type === 'reopenClosed') {
+      const existing = (await chrome.tabs.query({ windowType: 'normal' })).find(tab => !tab.incognito && parsePrUrl(tab.pendingUrl || tab.url)?.key === key);
+      if (existing?.id !== undefined) { await chrome.tabs.update(existing.id, { active: true }); await chrome.windows.update(existing.windowId, { focused: true }); }
+      else await chrome.tabs.create({ url: canonicalPr(pr.url, pr.title).url });
+    }
+    schedule(); return publicState();
+    }).finally(() => {
+      if (pendingKey) { const count = pendingKept.get(pendingKey)! - 1; if (count) pendingKept.set(pendingKey, count); else pendingKept.delete(pendingKey); epoch++; schedule(); }
+    });
+  }
+  if (request.type === 'beginImport') return queued(async () => { await beginImport(typeof request.owner === 'string' ? request.owner.trim() : '', request.mode === 'add' || request.mode === 'replace' ? request.mode : undefined); return publicState(); });
   if (['saveSettings', 'setEnabled', 'setToken', 'disconnect', 'checkConnection', 'removeConnection'].includes(String(request.type))) return queued(() => changeSettings(request));
   throw new Error('Unknown request.');
 }
@@ -97,18 +133,27 @@ async function changeSettings(request: Record<string, unknown>, beforeSave?: () 
   const token = settings.connections.find(c => c.owner.toLowerCase() === owner.toLowerCase())?.token ?? settings.token;
   let connectionCheck: ConnectionCheck | undefined;
   if (request.type === 'setToken' || request.type === 'checkConnection') {
-    connectionCheck = await verifyConnection(new GitHubClient(token, emptyCache()), await openPullRequests(), owner);
-    if (request.type === 'checkConnection') return { ...await publicState(), connectionCheck };
+    try { connectionCheck = await verifyConnection(new GitHubClient(token, emptyCache()), verificationRefs(await openPullRequests(), settings, owner), owner); }
+    catch (error) {
+      if (request.type === 'checkConnection') await chrome.storage.local.set({ connectionHealth: putHealth(await readHealth(), { owner: settings.connections.some(c => c.owner.toLowerCase() === owner.toLowerCase()) ? owner : '', status: 'error', checkedAt: Date.now(), message: error instanceof ApiError ? error.message : 'Could not check this connection.' }) });
+      throw error;
+    }
+    if (request.type === 'checkConnection') {
+      await chrome.storage.local.set({ connectionHealth: putHealth(await readHealth(), { owner: settings.connections.some(c => c.owner.toLowerCase() === owner.toLowerCase()) ? owner : '', status: connectionCheck.checked ? 'verified' : 'account-only', checkedAt: Date.now(), message: connectionCheck.checked ? `Access verified for ${connectionCheck.checked} PRs.` : 'Account verified; repository access has not been tested.' }) });
+      return { ...await publicState(), connectionCheck };
+    }
   }
   await beforeSave?.();
   epoch++;
   const values: Record<string, unknown> = { settings };
+  if (connectionCheck) values.connectionHealth = putHealth(await readHealth(), { owner, status: connectionCheck.checked ? 'verified' : 'account-only', checkedAt: Date.now(), message: connectionCheck.checked ? `Access verified for ${connectionCheck.checked} PRs.` : 'Account verified; repository access has not been tested.' });
   if (['setToken', 'removeConnection', 'disconnect'].includes(String(request.type))) {
     const { caches } = await readRunState();
     values.cache = emptyCache(); values.status = emptyStatus();
     values.connectionCaches = request.type === 'disconnect' ? [] : caches.filter(c => c.owner !== owner.toLowerCase());
   }
   if (request.type === 'disconnect' || request.type === 'removeConnection') await cancelImports(s => request.type === 'disconnect' || s.owner.toLowerCase() === owner.toLowerCase());
+  if (request.type === 'disconnect' || request.type === 'removeConnection') values.connectionHealth = (await readHealth()).filter(h => request.type !== 'disconnect' && h.owner !== owner.toLowerCase());
   await chrome.storage.local.set(values);
   schedule();
   return { ...await publicState(), connectionCheck };
@@ -124,7 +169,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     const session = await requireImportSession(sender);
     if (typeof message.token !== 'string') throw new Error('No generated token was provided.');
     const token = selectGeneratedToken([message.token]);
-    const result = await changeSettings({ type: 'setToken', token, owner: session.owner }, async () => { await requireImportSession(sender); });
+    const result = await changeSettings({ type: 'setToken', token, owner: session.owner, mode: session.mode }, async () => { await requireImportSession(sender); });
     await cancelImports(s => s.tabId === session.tabId);
     void chrome.runtime.openOptionsPage().catch(() => {});
     return { connectionCheck: result.connectionCheck };

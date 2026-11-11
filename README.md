@@ -4,7 +4,7 @@ A Chrome extension that groups open GitHub pull request tabs by workflow. Includ
 
 ## Install
 
-Download **mergelane-0.2.0.zip** from the [v0.2.0 release](https://github.com/willherr72/mergelane/releases/tag/v0.2.0) and extract it to a folder you will keep. The release ZIP contains the ready-to-load extension; GitHub's automatic source-code archives require building first.
+Download **mergelane-0.3.0.zip** from the [v0.3.0 release](https://github.com/willherr72/mergelane/releases/tag/v0.3.0) and extract it to a folder you will keep. The release ZIP contains the ready-to-load extension; GitHub's automatic source-code archives require building first.
 
 1. Open `chrome://extensions` in Chrome.
 2. Turn on **Developer mode**.
@@ -18,13 +18,15 @@ For updates, extract the new release into the same folder and click **Reload** o
 
 ## GitHub connection
 
-Open a PR tab, then open MergeLane's settings. The connection form detects the repository's owner. Click **Create token for [owner]** to open GitHub with the owner and read permissions prefilled. Select your repositories and generate the token on GitHub, then click **Import into MergeLane** in the helper panel. GitHub may ask you to sign in or confirm your identity. You can still paste tokens manually in MergeLane Settings.
+Open MergeLane Settings and click **Add connection**. Enter an organization or GitHub username, or choose a suggestion labeled **Detected from your open PR tabs**. The form always starts blank; no organization is hardcoded. Click **Create token for [owner]** to open GitHub with the owner and read permissions prefilled. Select repositories, generate the token, and click **Import into MergeLane** in the helper panel. GitHub may ask you to sign in or confirm your identity. You can also paste a token and click **Save connection**.
 
 **Resource owner must be the organization that owns the repository**, not your personal account. “All repositories” applies only to that selected owner. Grant **Pull requests: Read-only** and **Issues: Read-only**. GitHub may require organization approval; a pending token cannot read private organization repositories. See [GitHub's token setup documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
 
 Connecting validates the account and the open PRs under the selected owner, including comment and review access. A failed check leaves previous connections in place and lets you retry. With no matching PR tabs, MergeLane explicitly reports repository access as untested. Open a PR and click **Check** beside the saved connection to verify it.
 
-Add a connection for each owner. One owner's token can cover many repositories; MergeLane automatically selects the matching connection for each PR. Each connection has its own cache and retry window, so one failing owner does not stop the rest. Categories are shared across owners. **Remove** disconnects one owner; **Disconnect** removes all connections and pauses management. Existing single-token installations retain their token as a labeled default connection, used when there is no matching owner connection.
+Saved connections show their last check and whether repository access was verified, only the account was verified, or attention is needed. Use **Check** to test a saved token and **Replace token** (or **Reconnect**) to renew it without changing its owner. Adding an already-connected owner cannot replace its token.
+
+Add a connection for each owner. One owner's token can cover many repositories; MergeLane automatically selects the matching connection for each PR. Each connection has its own cache and retry window, so one failing owner does not stop the rest. Categories are shared across owners. **Remove** disconnects one owner; **Disconnect all** removes all connections and pauses management. Existing single-token installations retain their token as a labeled default connection, used and checked only for owners without a separate connection.
 
 The import helper appears only in a setup tab opened by MergeLane. Its grant lasts 30 minutes, survives a background-worker restart, and ends on successful import, tab closure, Disconnect, or browser restart. Token controls are read only after your explicit import click. If GitHub changes its page layout and the helper cannot identify exactly one generated token, use manual paste. This is assisted import, not automatic token generation or approval; no GitHub App or hosted service is required.
 
@@ -66,7 +68,11 @@ MergeLane tracks github.com PR pages and their subpages, such as files or commit
 - **Failed checks:** tabs stay open and retain their last known group.
 - **Loading/navigating tabs:** mutations wait for navigation to settle.
 
-Cleanup includes pinned PR tabs. Manually reopening an already merged PR is subject to the same cleanup rule; pause MergeLane when you want to keep completed PRs open. You can also restore recently closed tabs with Chrome's usual history/reopen controls.
+Cleanup includes pinned PR tabs. In the popup's **PRs** view, each PR shows its category and the rule that matched at its last check. Use **Keep open** to protect a PR from automatic closure while allowing grouping to continue.
+
+The **Recently closed** view stores the latest 30 unique PRs automatically closed by MergeLane. **Reopen and keep open** restores or focuses a PR and protects it before the tab opens. The **Kept open** view lists protections, including PRs whose tabs you closed manually. Protections survive worker and browser restarts until you choose **Resume cleanup**, which makes completed PRs eligible to close again. **Clear history** clears recent closures without removing protections. These lists stay local to your Chrome profile.
+
+Reopening an already completed PR through ordinary Chrome history does not add protection; use MergeLane's recovery action or pause management when you want to keep it open.
 
 Checks run about once a minute and when relevant tabs change. Sleeping devices, closed browsers, API rate limits, and network errors can delay updates. **Refresh now** requests a check but still respects GitHub's retry window. Pausing leaves existing groups and tabs in place. Manual reassignment of PR tabs is reapplied by the next successful check.
 

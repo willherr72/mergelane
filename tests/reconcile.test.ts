@@ -148,3 +148,38 @@ it('does not reorder a group containing a tracked PR that is navigating away', a
   await reconcile(t.deps);
   expect(t.moved).toEqual([]);
 });
+
+it.each([{ state: 'closed', merged: true }, { state: 'closed', closed_at: '2026-11-10T16:00:00Z' }])('keeps protected completed PRs open while still grouping them', async detail => {
+  const t = setup([{}, { pinned: true }]); t.apiClient.snapshot = async () => snapshot(detail);
+  t.apiClient.details = async () => snapshot(detail).details;
+  const result = await reconcile({ ...t.deps, keptKeys: new Set(['org/repo/1']) });
+  expect(t.tabs).toHaveLength(2); expect(result.closed).toBe(0); expect(t.groups).toHaveLength(1);
+  expect(result.prs[0].explanation).toContain('kept open');
+});
+
+it('records only successful automatic removals and uses the freshly verified closure reason', async () => {
+  const t = setup([{}, { url: url() + '/files' }]); const closed: unknown[] = [];
+  t.apiClient.snapshot = async () => snapshot({ state: 'closed', merged: true, title: 'Old' });
+  t.apiClient.details = async () => snapshot({ state: 'closed', merged: false, closed_at: '2026-11-10T16:00:00Z', title: 'Current' }).details;
+  await reconcile({ ...t.deps, onClosed: async entry => { closed.push(entry); } });
+  expect(closed).toHaveLength(2); expect(closed[0]).toMatchObject({ key: 'org/repo/1', title: 'Current', reason: 'closed', url: url() });
+  const fail = setup(); fail.apiClient.snapshot = t.apiClient.snapshot; fail.apiClient.details = t.apiClient.details;
+  fail.deps.chrome.tabs.remove = async () => { throw new Error('Removal failed'); };
+  const recorded: unknown[] = [];
+  await reconcile({ ...fail.deps, onClosed: async entry => { recorded.push(entry); } });
+  expect(recorded).toEqual([]);
+});
+
+it('records a completed removal even when the run is canceled immediately afterward', async () => {
+  const t = setup([{}, {}]); let current = true; const recorded: unknown[] = [];
+  t.apiClient.snapshot = async () => snapshot({ state: 'closed', merged: true });
+  t.apiClient.details = async () => snapshot({ state: 'closed', merged: true }).details;
+  await reconcile({ ...t.deps, isCurrent: () => current, onClosed: async pr => { recorded.push(pr); current = false; } });
+  expect(recorded).toHaveLength(1); expect(t.tabs).toHaveLength(1);
+});
+
+it('does not describe an unknown closure time as a known grace period', async () => {
+  const t = setup(); t.apiClient.snapshot = async () => snapshot({ state: 'closed', closed_at: null });
+  const status = await reconcile(t.deps);
+  expect(status.prs[0].explanation).toContain('without a usable closure time'); expect(t.tabs).toHaveLength(1);
+});

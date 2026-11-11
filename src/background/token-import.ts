@@ -7,11 +7,11 @@ async function sessions(): Promise<ImportSession[]> {
   const { tokenImports } = await chrome.storage.session.get<{ tokenImports?: ImportSession[] }>('tokenImports');
   return (tokenImports ?? []).filter(s => s.expiresAt > Date.now());
 }
-export async function beginImport(owner: string): Promise<void> {
+export async function beginImport(owner: string, mode?: 'add' | 'replace'): Promise<void> {
   if (!/^[a-z\d][a-z\d-]{0,38}$/i.test(owner)) throw new Error('Enter the organization or account that owns your repositories.');
   const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
   if (tab.id === undefined || tab.incognito) throw new Error('Open MergeLane in a normal Chrome window.');
-  const session = { tabId: tab.id, owner, expiresAt: Date.now() + IMPORT_LIFETIME };
+  const session = { tabId: tab.id, owner, expiresAt: Date.now() + IMPORT_LIFETIME, mode };
   await chrome.storage.session.set({ tokenImports: [...(await sessions()).slice(-9), session] });
   try { await chrome.tabs.update(tab.id, { url: tokenCreationUrl(owner) }); }
   catch (error) { await cancelImports(s => s.tabId === tab.id); throw error; }

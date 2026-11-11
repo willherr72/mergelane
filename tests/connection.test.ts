@@ -1,10 +1,18 @@
 import { expect, it } from 'vitest';
-import { tokenCreationUrl, verifyConnection } from '../src/github/connection';
+import { tokenCreationUrl, verificationRefs, verifyConnection } from '../src/github/connection';
+import { defaultSettings } from '../src/core/settings';
 import { GitHubClient, emptyCache } from '../src/github/client';
 
 const ref = { owner: 'Example-Org', repo: 'repo', number: 123, key: 'example-org/repo/123' };
 const detail = { state: 'open', merged: false, closed_at: null, draft: false, user: { login: 'author', type: 'User' }, labels: [] };
 const json = (value: unknown) => new Response(JSON.stringify(value));
+
+it('checks the default token only against repositories it actually serves', () => {
+  const explicit = { ...ref, owner: 'other', key: 'other/repo/123' };
+  const settings = { ...defaultSettings(), token: 'legacy', connections: [{ owner: 'OTHER', token: 'explicit' }] };
+  expect(verificationRefs([ref, explicit], settings, '')).toEqual([ref]);
+  expect(verificationRefs([ref, explicit], settings, 'other')).toEqual([explicit]);
+});
 
 it('prefills the resource owner and only the required read permissions', () => {
   const url = new URL(tokenCreationUrl('Example-Org'));

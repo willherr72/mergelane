@@ -56,3 +56,13 @@ it('loads legacy settings without dropping the token, and rejects duplicate owne
   expect(validateSettings(legacy).token).toBe('legacy');
   expect(() => validateSettings({ ...legacy, connections: [{ owner: 'org', token: 'a' }, { owner: 'ORG', token: 'b' }] })).toThrow('owner');
 });
+
+it('rejects stale replacements and prevents Add from silently replacing a credential', () => {
+  const current = defaultSettings();
+  expect(() => applySettingsAction(current, { type: 'setToken', owner: 'org', token: 'new', mode: 'replace' })).toThrow('removed');
+  expect(() => applySettingsAction(current, { type: 'setToken', owner: '', token: 'new', mode: 'replace' })).toThrow('removed');
+  expect(() => applySettingsAction(current, { type: 'setToken', owner: '', token: 'new', mode: 'add' })).toThrow('organization');
+  const connected = applySettingsAction(current, { type: 'setToken', owner: 'org', token: 'old', mode: 'add' });
+  expect(() => applySettingsAction(connected, { type: 'setToken', owner: 'ORG', token: 'new', mode: 'add' })).toThrow('already');
+  expect(applySettingsAction(connected, { type: 'setToken', owner: 'ORG', token: 'new', mode: 'replace' }).connections[0].token).toBe('new');
+});

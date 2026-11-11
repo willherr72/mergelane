@@ -5,6 +5,17 @@ import { parsePrUrl } from './core/url';
 import type { PrRef } from './core/model';
 import type { ConnectionCheck } from './github/connection';
 import type { OwnerCache } from './github/owners';
+import { emptyCleanup, type CleanupState } from './core/cleanup';
+import type { ConnectionHealth } from './core/health';
+
+export async function readCleanup(): Promise<CleanupState> {
+  const { cleanup } = await chrome.storage.local.get<{ cleanup?: CleanupState }>('cleanup');
+  return cleanup ?? emptyCleanup();
+}
+export async function readHealth(): Promise<ConnectionHealth[]> {
+  const { connectionHealth } = await chrome.storage.local.get<{ connectionHealth?: ConnectionHealth[] }>('connectionHealth');
+  return connectionHealth ?? [];
+}
 
 export async function initializeStorage(): Promise<void> {
   await Promise.all([
@@ -27,8 +38,8 @@ export async function openPullRequests(): Promise<PrRef[]> {
   const refs = windows.filter(window => !window.incognito).flatMap(window => (window.tabs ?? []).filter(tab => !tab.incognito).map(tab => parsePrUrl(tab.pendingUrl || tab.url || '')).filter((ref): ref is PrRef => !!ref));
   return [...new Map(refs.map(ref => [ref.key, ref])).values()];
 }
-export interface PublicState { settings: Settings; hasToken: boolean; hasLegacyToken: boolean; status: RunStatus; openPrs: PrRef[]; connectionCheck?: ConnectionCheck }
+export interface PublicState { settings: Settings; hasToken: boolean; hasLegacyToken: boolean; status: RunStatus; openPrs: PrRef[]; connectionCheck?: ConnectionCheck; cleanup: CleanupState; connectionHealth: ConnectionHealth[] }
 export async function publicState(): Promise<PublicState> {
-  const [settings, { status }, openPrs] = await Promise.all([readSettings(), readRunState(), openPullRequests()]);
-  return { settings: { ...settings, token: '', connections: settings.connections.map(c => ({ owner: c.owner, token: '' })) }, hasToken: hasCredentials(settings), hasLegacyToken: !!settings.token, status, openPrs };
+  const [settings, { status }, openPrs, cleanup, connectionHealth] = await Promise.all([readSettings(), readRunState(), openPullRequests(), readCleanup(), readHealth()]);
+  return { settings: { ...settings, token: '', connections: settings.connections.map(c => ({ owner: c.owner, token: '' })) }, hasToken: hasCredentials(settings), hasLegacyToken: !!settings.token, status, openPrs, cleanup, connectionHealth };
 }

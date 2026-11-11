@@ -4,15 +4,17 @@ Date: 2026-11-10. Platform: Windows; Node.js 24.12.0; isolated Playwright Chromi
 
 ## Automated checks
 
-- `npm test`: 54 tests passed across workflow rules, settings actions, owner routing/backoff, import guards, GitHub transport, connection verification, and browser reconciliation.
+- `npm test`: 65 tests passed across workflow rules and explanations, cleanup history/protection, connection health, settings actions, owner routing/backoff, import guards, GitHub transport, connection verification, and browser reconciliation.
 - `npm run typecheck`: passed.
 - `npm run build`: passed; manifest entrypoints, bundled fonts, and PNG icons verified.
-- `npm run smoke`: 13 integration checks passed against the actual packaged extension using native Chrome APIs.
-- `npm run smoke:import`: 7 integration checks passed using the actual content script, Chrome messaging and trusted storage restrictions.
+- `npm run smoke`: 20 integration checks passed against the actual packaged extension using native Chrome APIs.
+- `npm run smoke:import`: 8 integration checks passed using the actual content script, Chrome messaging and trusted storage restrictions.
 
 The browser integration verified paused-by-default installation; credential setup and omission from public state; bot/human/review/queue classification; merged and closed cleanup; a recent closure staying open; pinned tabs and separate windows; category/label editing; custom-category persistence; popup pause/resume; actual MV3 worker restart with alarm reconstruction and group reuse; saving a stale draft without undoing a pause; pausing/disconnecting with unfinished rules; and a narrow settings layout with no horizontal overflow.
 
 The import integration verifies explicit trusted clicks, missing generated tokens, restricted settings/storage access, unrelated setup tabs, worker-restart persistence, successful owner verification, replay rejection, failed import/retry, native grouping with distinct credentials for two owners, removal of one connection, Disconnect, expiry, and navigation away while verification is in flight.
+
+Version 0.3.0 additionally verifies blank Add forms, duplicate prevention, owner-locked Replace forms, account-only health, per-PR rule explanations, keep-open protection while a credential check blocks the command queue, recovery of merged and old-closed PRs, persistent protection/history after a full browser restart, explicit Resume cleanup, and clearing history without removing protection. Mixed default/owner-specific credentials and stale Replace requests are exercised through real Chrome messaging. The integration flow exercises all three popup views, with screenshots of PRs and Recently closed.
 
 The smoke tests use fixture GitHub responses/token-result pages and temporary browser profiles. They do not contact GitHub with real credentials or alter existing user profiles. Test profiles are removed after the browser closes.
 
@@ -26,16 +28,16 @@ The smoke tests use fixture GitHub responses/token-result pages and temporary br
 ## Artifacts
 
 - `dist/`: unpacked extension ready for Chrome's Load unpacked action.
-- `artifacts/mergelane-0.2.0.zip`: archive of the same unpacked extension, with the manifest at its root.
+- `artifacts/mergelane-0.3.0.zip`: archive of the same unpacked extension, with the manifest at its root; a companion `.sha256` file records its digest.
 - `artifacts/smoke-report.json`: machine-readable integration results.
 - `artifacts/import-smoke-report.json`: machine-readable assisted-import integration results.
 - `artifacts/assisted-import.png`: isolated helper panel screenshot, without token contents.
-- `artifacts/settings.png`, `settings-narrow.png`, `popup.png`: screenshots from the tested extension.
+- `artifacts/settings.png`, `settings-narrow.png`, `popup.png`, `popup-cleanup.png`: screenshots from the tested extension.
 - `README.md`: setup, permissions, workflow and development instructions.
 
 ## Scope of evidence
 
-The user reported assisted import working in a live GitHub setup after the 0.2.0 build. This is user-reported confirmation, not an independently observed authenticated test. GitHub's token-result markup, organization policies, fine-grained token approval, and repository access can vary. The helper intentionally declines missing or ambiguous token controls; manual paste remains available. Full browser-restart invalidation relies on Chrome session-storage lifetime; actual worker suspension/restart is tested. Version 0.2.0 is prepared for a public GitHub release; it is not published to the Chrome Web Store.
+The user reported assisted import working in a live GitHub setup after the 0.2.0 build. This is user-reported confirmation, not an independently observed authenticated test. GitHub's token-result markup, organization policies, fine-grained token approval, and repository access can vary. The helper intentionally declines missing or ambiguous token controls; manual paste remains available. Actual worker suspension/restart and cleanup persistence across a full browser restart are tested. Import-grant invalidation across a full browser restart still relies on Chrome session-storage lifetime. Releases are distributed through GitHub, not the Chrome Web Store.
 
 ## Independent review
 
@@ -50,3 +52,11 @@ No minor findings were deferred. The reviewer did not independently verify live 
 The 0.1.1 connection correction received a separate review with no blocking findings. The reviewer independently reran all 46 unit tests. Optional additional cases noted were permission verification for closed PRs and an open-tab list containing only other owners; no code defects were identified.
 
 The 0.2.0 assisted-import and multiple-owner changes received a separate review with no blocking findings. Review focused on credential disclosure, sender validation, session lifetime/replay/navigation, migration, and cache/retry isolation. Native smoke checks subsequently covered two review gaps: navigation during verification and direct content-script storage denial. Live GitHub markup and full browser restart remain the limits described above. The import smoke's setup-tab matcher now identifies the requested owner URL rather than accepting any new page event after a navigation timeout was observed in a concurrent browser run.
+
+The 0.3.0 review identified three issues, corrected before release:
+
+1. Keep open could wait behind a slow credential check while reconciliation closed the tab. Pending protection now invalidates an active reconciliation immediately and participates in subsequent runs before persistence completes. A native regression holds account verification open and verifies the merged tab survives during that wait.
+2. Default-token verification could include owners served by explicit connections. Verification now uses the same owner selection as routing; unit and native tests cover mixed credentials.
+3. A stale Replace form could recreate a removed connection. Worker-side Add/Replace intent guards now reject stale replacement and duplicate addition, including assisted import. Unit and native tests cover the command guards.
+
+Additional unit coverage verifies closure records survive cancellation after a real removal and missing closure timestamps do not claim a known grace period. The reviewer inspected code; final test execution and screenshot inspection were performed by the implementation agent.

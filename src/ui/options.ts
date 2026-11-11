@@ -1,5 +1,5 @@
 import './options.css';
-import { COLORS, type Category, type ConditionKind } from '../core/model';
+import { COLORS, type Category, type ConditionKind, type Settings } from '../core/model';
 import { defaultSettings, validateSettings } from '../core/settings';
 import type { PublicState } from '../storage';
 import { tokenCreationUrl } from '../github/connection';
@@ -11,7 +11,9 @@ let state: PublicState;
 let draft = defaultSettings();
 let selected = 'merging';
 let dirty = false, busy = false;
-let connectionOwner: string | undefined;
+let connectionOwner = '', connectionToken = '';
+let connectionEditor: 'add' | 'replace' | null = null;
+let pendingImportOwner: string | null = null;
 let connectionMessage = '';
 let connectionFailed = false;
 let toastTimer: ReturnType<typeof setTimeout>;
@@ -28,6 +30,11 @@ function laneIcon(c: Category): string { return c.fallback ? 'progress' : c.id =
 function color(element: HTMLElement, lane: Category): void { element.style.setProperty('--lane', `var(--${lane.color})`); }
 function field(label: string, id: string, input: HTMLElement): HTMLElement {
   const f = el('div', 'field'), l = el('label', 'fieldlabel', label); l.htmlFor = id; input.id = id; f.append(l, input); return f;
+}
+function openConnectionEditor(mode: 'add' | 'replace', owner = ''): void {
+  connectionEditor = mode; connectionOwner = owner; connectionToken = ''; connectionMessage = ''; connectionFailed = false;
+  render(); document.getElementById('connectionEditor')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  document.getElementById(mode === 'add' ? 'resourceOwner' : 'token')?.focus();
 }
 
 async function save(): Promise<void> {
@@ -54,6 +61,8 @@ async function operate(type: string, data: Record<string, unknown>, message: str
     // worker. Pausing/disconnecting never validates or saves those edits.
     if (!dirty) draft = structuredClone(state.settings);
     draft.enabled = state.settings.enabled;
+    if (type === 'setToken' || type === 'disconnect') { connectionEditor = null; connectionToken = ''; }
+    if (type === 'beginImport') pendingImportOwner = String(data.owner).toLowerCase();
     if (state.connectionCheck) {
       const check = state.connectionCheck;
       connectionMessage = check.checked ? `Access verified for ${check.checked} PR${check.checked === 1 ? '' : 's'}${check.owner ? ` under ${check.owner}` : ''}. Signed in as ${check.login}.` : `Account verified as ${check.login}. Repository access has not been tested. Open a PR${check.owner ? ` under ${check.owner}` : ''}, then click Check access.`;
@@ -63,6 +72,7 @@ async function operate(type: string, data: Record<string, unknown>, message: str
     render(); toast(message);
   } catch (error) {
     const message = showError(error);
+    if (type === 'checkConnection') { state = await send('getState'); render(); }
     if (type === 'setToken' || type === 'checkConnection') {
       connectionMessage = message; connectionFailed = true;
       const result = document.getElementById('connectionResult');
@@ -73,7 +83,7 @@ async function operate(type: string, data: Record<string, unknown>, message: str
   finally { busy = false; root.inert = false; root.removeAttribute('aria-busy'); }
 }
 async function toggleEnabled(): Promise<void> {
-  if (!state.hasToken) { document.getElementById('connection')?.scrollIntoView({ behavior: 'smooth' }); document.getElementById('token')?.focus(); return; }
+  if (!state.hasToken) { openConnectionEditor('add'); return; }
   const enabled = !state.settings.enabled;
   await operate('setEnabled', { enabled }, enabled ? 'Settings saved. MergeLane is enabled.' : 'MergeLane is paused.');
 }
@@ -173,37 +183,59 @@ function renderEditor(): void {
 
 function renderConnection(): HTMLElement {
   const section = el('section', 'connection'); section.id = 'connection';
-  section.append(el('h2', '', 'GitHub connections'), el('p', 'helper', 'Connect each organization or account whose PRs you track. Tokens stay in this Chrome profile.'));
+  const heading = el('div', 'connectionshead');
+  heading.append(el('h2', '', 'GitHub connections'), button('Add connection', 'primary', () => openConnectionEditor('add')));
+  section.append(heading, el('p', 'helper', 'One connection per organization or personal account. Each can cover multiple repositories.'));
+  section.append(el('h3', 'connectiontitle', 'Saved connections'));
   const savedConnections = el('div', 'savedconnections');
+  if (!state.hasToken) savedConnections.append(el('p', 'helper', 'No connections yet. Add an organization or your personal GitHub account to get started.'));
   for (const saved of [...state.settings.connections, ...(state.hasLegacyToken ? [{ owner: '', token: '' }] : [])]) {
-    const row = el('div', 'settingrow'), description = el('div');
-    description.append(el('span', 'fieldlabel', saved.owner || 'Existing token · default connection'), el('p', '', saved.owner ? 'Used automatically for this owner’s PRs.' : 'Preserved from earlier setup. Used when an owner has no separate connection.'));
+    const row = el('div', 'settingrow connectionrow'), description = el('div'); row.dataset.owner = saved.owner || 'default';
+    const health = state.connectionHealth.find(h => h.owner === saved.owner.toLowerCase());
+    description.append(el('span', 'fieldlabel', saved.owner || 'Existing token · default connection'), el('p', health?.status === 'error' ? 'error' : '', health ? `${health.status === 'error' ? 'Needs attention' : health.status === 'account-only' ? 'Account verified · repository access untested' : 'Access verified'} · ${relativeTime(health.checkedAt)}` : 'Not checked yet'));
+    if (health?.status === 'error') description.append(el('p', 'helper', health.message));
+    if (!saved.owner) description.append(el('p', 'helper', 'Used when an owner has no separate connection.'));
     const actions = el('div', 'actions');
-    actions.append(button('Check', 'outline', () => { void operate('checkConnection', { owner: saved.owner }, ''); }, `Check ${saved.owner || 'default'} connection`), button('Remove', 'textbutton', () => { void operate('removeConnection', { owner: saved.owner }, 'Connection removed.'); }, `Remove ${saved.owner || 'default'} connection`));
+    actions.append(button('Check', 'outline', () => { void operate('checkConnection', { owner: saved.owner }, ''); }, `Check ${saved.owner || 'default'} connection`), button(health?.status === 'error' ? 'Reconnect' : 'Replace token', 'outline', () => openConnectionEditor('replace', saved.owner), `Replace ${saved.owner || 'default'} token`), button('Remove', 'textbutton', () => { void operate('removeConnection', { owner: saved.owner }, 'Connection removed.'); }, `Remove ${saved.owner || 'default'} connection`));
     row.append(description, actions); savedConnections.append(row);
   }
   section.append(savedConnections);
   const grid = el('div', 'connectiongrid'), credentials = el('div'), ignored = el('div');
-  const owners = [...new Map([...state.openPrs, ...state.settings.connections].map(ref => [ref.owner.toLowerCase(), ref.owner])).values()];
-  connectionOwner ??= owners[0] ?? '';
-  const owner = el('input', 'input'); owner.value = connectionOwner; owner.placeholder = 'Organization or account name'; owner.maxLength = 39; owner.autocomplete = 'off'; owner.spellcheck = false;
-  const suggestions = el('datalist'); suggestions.id = 'openPrOwners'; owner.setAttribute('list', suggestions.id);
-  for (const name of owners) { const option = el('option'); option.value = name; suggestions.append(option); }
-  credentials.append(field('1. Resource owner', 'resourceOwner', owner), suggestions);
-  credentials.append(el('p', 'helper', 'Use the organization that owns your repository. “All repositories” only covers this owner, not organizations you belong to.'));
-  const help = el('p', 'helper'), link = el('a'); link.target = '_blank'; link.rel = 'noreferrer noopener';
-  const updateLink = () => { connectionOwner = owner.value.trim(); link.href = tokenCreationUrl(connectionOwner); link.textContent = connectionOwner ? `Create token for ${connectionOwner}` : 'Create a read-only token'; };
-  owner.oninput = updateLink; updateLink();
-  link.onclick = event => {
-    event.preventDefault();
-    void operate('beginImport', { owner: owner.value.trim() }, 'GitHub setup opened. Generate the token, then click Import into MergeLane on that page.');
-  };
-  help.append(link, '. Select repositories and generate the token on GitHub, then click Import into MergeLane. Read permissions are prefilled.'); credentials.append(help);
-  credentials.append(el('p', 'helper', 'Or paste a token below. Adding another owner keeps your existing connections. Organization approval may still be required.'));
-  const token = el('input', 'input'); token.type = 'password'; token.autocomplete = 'off'; token.spellcheck = false; token.placeholder = state.hasToken ? 'Paste a replacement token' : 'Paste your GitHub token'; token.maxLength = 1000;
-  credentials.append(field('Personal access token', 'token', token));
-  const actions = el('div', 'actions'); actions.append(button(state.hasToken ? 'Update token' : 'Connect GitHub', 'primary', () => { if (!token.value.trim()) return toast('Paste a GitHub token first.', true); void operate('setToken', { token: token.value.trim(), owner: owner.value.trim() }, ''); }));
-  if (state.hasToken) actions.append(button('Check access', 'outline', () => { void operate('checkConnection', { owner: owner.value.trim() }, ''); }), button('Disconnect', 'textbutton', () => { void operate('disconnect', {}, 'Disconnected. MergeLane is paused.'); })); credentials.append(actions);
+  if (connectionEditor) {
+    const form = el('div', 'connectionform'); form.id = 'connectionEditor';
+    form.append(el('h3', 'connectiontitle', connectionEditor === 'add' ? 'Add a connection' : `Replace token for ${connectionOwner || 'default connection'}`));
+    const owner = el('input', 'input'); owner.value = connectionOwner; owner.placeholder = 'Organization or GitHub username'; owner.maxLength = 39; owner.autocomplete = 'off'; owner.spellcheck = false; owner.readOnly = connectionEditor === 'replace';
+    form.append(field('Resource owner', 'resourceOwner', owner));
+    const note = el('p', 'helper');
+    const link = el('a'); link.target = '_blank'; link.rel = 'noreferrer noopener';
+    const token = el('input', 'input'); token.type = 'password'; token.autocomplete = 'off'; token.spellcheck = false; token.placeholder = 'Paste your GitHub token'; token.maxLength = 1000; token.value = connectionToken; token.oninput = () => { connectionToken = token.value; };
+    const saveToken = button(connectionEditor === 'add' ? 'Save connection' : 'Replace token', 'primary', () => {
+      if (!token.value.trim()) return toast('Paste a GitHub token first.', true);
+      void operate('setToken', { token: token.value.trim(), owner: owner.value.trim(), mode: connectionEditor }, '');
+    });
+    const update = () => {
+      connectionOwner = owner.value.trim();
+      const duplicate = connectionEditor === 'add' && state.settings.connections.some(c => c.owner.toLowerCase() === connectionOwner.toLowerCase());
+      saveToken.disabled = duplicate || (connectionEditor === 'add' && !connectionOwner);
+      note.textContent = duplicate ? 'This owner already has a connection. Use Replace token in Saved connections.' : 'Use the owner of the repository. GitHub’s “All repositories” applies only to this owner.';
+      link.href = tokenCreationUrl(connectionOwner); link.textContent = connectionOwner ? `Create token for ${connectionOwner}` : 'Choose an owner to create a token'; link.setAttribute('aria-disabled', String(!connectionOwner || duplicate));
+    };
+    owner.oninput = update; update();
+    form.append(note);
+    if (connectionEditor === 'add') {
+      const owners = [...new Map(state.openPrs.map(ref => [ref.owner.toLowerCase(), ref.owner])).values()].filter(name => !state.settings.connections.some(c => c.owner.toLowerCase() === name.toLowerCase()));
+      if (owners.length) {
+        const suggestions = el('div', 'ownersuggestions'); suggestions.append(el('p', 'helper', 'Detected from your open PR tabs'));
+        for (const name of owners) suggestions.append(button(name, 'outline', () => { owner.value = name; update(); owner.focus(); }, `Use detected owner ${name}`));
+        form.append(suggestions);
+      }
+    }
+    link.onclick = event => { event.preventDefault(); if (link.getAttribute('aria-disabled') === 'true') return; void operate('beginImport', { owner: connectionOwner, mode: connectionEditor }, 'GitHub setup opened. Generate the token, then click Import into MergeLane on that page.'); };
+    if (connectionOwner || connectionEditor === 'add') { const help = el('p', 'helper tokenhelp'); help.append(link, '. Generate it on GitHub, then click Import into MergeLane. Read permissions are prefilled.'); form.append(help); }
+    form.append(el('p', 'helper', 'Or paste a token below. Your other connections will stay connected.'), field('Personal access token', 'token', token));
+    const actions = el('div', 'actions'); actions.append(saveToken, button('Cancel', 'textbutton', () => { connectionEditor = null; connectionToken = ''; render(); })); form.append(actions); credentials.append(form);
+  } else credentials.append(el('p', 'helper', 'Use Add connection for another owner. Use Replace token to renew an existing connection. Tokens stay in this Chrome profile.'));
+  if (state.hasToken) credentials.append(button('Disconnect all', 'textbutton', () => { void operate('disconnect', {}, 'Disconnected. MergeLane is paused.'); }));
   const result = el('p', connectionFailed ? 'notice error' : 'helper', connectionMessage); result.id = 'connectionResult'; result.setAttribute('role', 'status'); result.hidden = !connectionMessage; credentials.append(result);
   const accounts = el('textarea', 'input'); accounts.value = draft.ignoredLogins.join('\n'); accounts.placeholder = 'automation-account\nreview-helper'; accounts.spellcheck = false;
   accounts.oninput = () => { draft.ignoredLogins = accounts.value.split(/[\s,]+/).filter(Boolean); changed(); };
@@ -253,12 +285,15 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !state) return;
   if (changes.status) { state.status = changes.status.newValue as PublicState['status']; renderViews(); }
   if (changes.settings && !busy) {
+    const next = changes.settings.newValue as Settings | undefined, previous = changes.settings.oldValue as Settings | undefined;
+    if (pendingImportOwner && next?.connections?.some(c => c.owner.toLowerCase() === pendingImportOwner && c.token !== previous?.connections?.find(old => old.owner.toLowerCase() === pendingImportOwner)?.token)) { connectionEditor = null; connectionToken = ''; pendingImportOwner = null; }
     if (!dirty) void start();
     else void send('getState').then(latest => {
       if (busy) return;
       state = latest; draft.enabled = latest.settings.enabled; render();
     }).catch(error => toast(showError(error), true));
   }
+  if (changes.connectionHealth && !changes.settings && !busy) void send('getState').then(latest => { if (!busy) { state = latest; render(); } }).catch(() => {});
 });
 window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
 void start();
