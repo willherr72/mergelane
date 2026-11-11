@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "MergeLane",
+  "description": "Organize GitHub pull request tabs by workflow and clear completed PRs.",
+  "version": "0.2.0",
+  "minimum_chrome_version": "120",
+  "permissions": ["tabGroups", "storage", "alarms"],
+  "host_permissions": ["https://github.com/*", "https://api.github.com/*"],
+  "background": { "service_worker": "worker.js", "type": "module" },
+  "content_scripts": [{ "matches": ["https://github.com/settings/personal-access-tokens", "https://github.com/settings/personal-access-tokens/*"], "js": ["token-import.js"], "run_at": "document_idle", "all_frames": false }],
+  "action": { "default_title": "MergeLane", "default_popup": "popup.html", "default_icon": { "16": "assets/icon16.png", "32": "assets/icon32.png" } },
+  "icons": { "16": "assets/icon16.png", "32": "assets/icon32.png", "48": "assets/icon48.png", "128": "assets/icon128.png" },
+  "options_page": "options.html",
+  "incognito": "not_allowed",
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'; base-uri 'none'; connect-src https://api.github.com" }
+}

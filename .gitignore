@@ -1,0 +1,7 @@
+node_modules/
+dist/
+artifacts/
+.superpowers/
+*.log
+.env*
+!.env.example

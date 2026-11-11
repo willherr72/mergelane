@@ -1,0 +1,23 @@
+{
+  "name": "mergelane",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "GitHub pull request tabs, organized by workflow.",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:import": "node scripts/import-smoke.mjs"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.3.7",
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.65.0",
+    "sharp": "^0.35.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
