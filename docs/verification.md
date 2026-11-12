@@ -1,5 +1,18 @@
 # MergeLane verification
 
+## PR discovery update — 2026-11-12
+
+- `npm test`: 80 tests passed, including authored/owner filtering, pagination validation, baseline creation, pending-tab deduplication, fresh closure/author verification, pause/cancellation, per-owner failures, failed-create retry, account changes, and persistent manual dismissal.
+- `npm run typecheck` and `npm run build`: passed.
+- `npm run smoke`: 24 checks passed using the built extension and native Chromium APIs. New coverage verifies initial backlog suppression, automatic background creation and grouping without stealing focus, manual dismissal, a pause during native tab creation, and paused discovery across a full browser restart.
+- `npm run smoke:import`: all 8 existing import checks passed.
+
+These checks use fixture API responses and isolated browser profiles. Live authenticated discovery has not been tested. The implementation uses GitHub's documented [`GET /issues` with `filter=created`](https://docs.github.com/en/rest/issues/issues#list-issues-assigned-to-the-authenticated-user), filtered to PRs belonging to each explicit owner connection.
+
+Independent review found two edge cases, reproduced with failing tests and fixed: inaccessible PRs now remain retryable without blocking later PRs under the same owner, and completed tab creations preserve their handled keys when a concurrent pause invalidates the run. Stale completion saves merge only into the same owner/account baseline, without restoring removed connections or overwriting newer progress.
+
+## Previous release verification
+
 Date: 2026-11-10. Platform: Windows; Node.js 24.12.0; isolated Playwright Chromium 158.
 
 ## Automated checks

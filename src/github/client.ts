@@ -1,5 +1,9 @@
 import type { Actor, Comment, PrDetails, PrRef, Review, Snapshot } from '../core/model';
 import { repositoryAccessError } from './connection';
+import { parsePrUrl } from '../core/url';
+
+export interface DiscoveredPr extends PrRef { createdAt: number }
+export interface AuthoredPullRequests { login: string; prs: DiscoveredPr[] }
 
 interface Entry { data: unknown; etag: string | null; next: string | null; usedAt: number }
 export interface RequestCache { scope: string; entries: Record<string, Entry> }
@@ -44,6 +48,33 @@ export class GitHubClient {
       return value.login;
     }, true);
     return entry.data as string;
+  }
+
+  async authoredPullRequests(owner: string): Promise<AuthoredPullRequests> {
+    const login = await this.checkToken();
+    const prs = new Map<string, DiscoveredPr>(), seen = new Set<string>();
+    let url: string | null = 'https://api.github.com/issues?filter=created&state=open&sort=created&direction=asc&per_page=100';
+    while (url) {
+      const parsed = new URL(url);
+      if (parsed.origin !== 'https://api.github.com' || parsed.pathname !== '/issues' || parsed.username || parsed.password || parsed.searchParams.get('filter') !== 'created' || parsed.searchParams.get('state') !== 'open' || seen.has(url) || seen.size >= 1000) throw new ApiError('GitHub returned an unsafe or incomplete discovery pagination chain.');
+      seen.add(url);
+      // Normalize before caching: never retain issue bodies or unrelated PRs.
+      const entry = await this.get(url, value => {
+        if (!Array.isArray(value)) throw new ApiError('GitHub returned an incomplete PR discovery list.');
+        return value.flatMap(item => {
+          if (!object(item)) throw new ApiError('GitHub returned incomplete PR discovery data.');
+          if (!('pull_request' in item)) return [];
+          const ref = object(item.pull_request) ? parsePrUrl(item.pull_request.html_url) : null;
+          const createdAt = typeof item.created_at === 'string' ? Date.parse(item.created_at) : NaN;
+          const user = actor(item.user);
+          if (!ref || !Number.isFinite(createdAt) || !user || !['open', 'closed'].includes(item.state)) throw new ApiError('GitHub returned incomplete PR discovery data.');
+          return item.state === 'open' && ref.owner.toLowerCase() === owner.toLowerCase() && user.login.toLowerCase() === login.toLowerCase() ? [{ ...ref, createdAt }] : [];
+        });
+      });
+      for (const pr of entry.data as DiscoveredPr[]) prs.set(pr.key, pr);
+      url = entry.next;
+    }
+    return { login, prs: [...prs.values()] };
   }
 
   async details(ref: PrRef, fresh = false): Promise<PrDetails> {

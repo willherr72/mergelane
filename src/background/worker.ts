@@ -1,7 +1,7 @@
 import { applySettingsAction } from '../core/actions';
 import { emptyStatus, hasCredentials } from '../core/model';
 import { ApiError, GitHubClient, emptyCache } from '../github/client';
-import { initializeStorage, openPullRequests, publicState, readCleanup, readHealth, readRunState, readSettings } from '../storage';
+import { initializeStorage, openPullRequests, publicState, readCleanup, readDiscovery, readHealth, readRunState, readSettings } from '../storage';
 import { addClosure, canonicalPr, setProtection } from '../core/cleanup';
 import { healthFromRun, putHealth } from '../core/health';
 import { parsePrUrl } from '../core/url';
@@ -10,10 +10,12 @@ import { reconcile } from './reconcile';
 import { OwnerClient } from '../github/owners';
 import { beginImport, cancelImports, importSession, requireImportSession } from './token-import';
 import { selectGeneratedToken } from '../core/token-import';
+import { discoverPullRequests, mergeHandledDiscovery } from './discovery';
 
 let epoch = 0;
 let rerun = false;
 let running: Promise<void> | null = null;
+let forceDiscovery = false;
 let debounce: ReturnType<typeof setTimeout> | undefined;
 let saveQueue: Promise<unknown> = Promise.resolve();
 const pendingKept = new Map<string, number>();
@@ -29,7 +31,7 @@ async function reportFailure(error: unknown): Promise<void> {
   await chrome.storage.local.set({ status: { ...emptyStatus(), attemptedAt: Date.now(), errors: [{ pr: '', message }] } });
 }
 
-async function runOnce(): Promise<void> {
+async function runOnce(force = false): Promise<void> {
   const ticket = epoch;
   const settings = await readSettings();
   const state = await readRunState();
@@ -46,20 +48,33 @@ async function runOnce(): Promise<void> {
   // after some of those mutations. Preserve it for the next reconciliation.
   await chrome.storage.session.set({ ownership: state.ownership });
   if (ticket !== epoch) { rerun = true; return; }
+  const discovered = await discoverPullRequests({ chrome, settings, api: client, state: await readDiscovery(), now: Date.now, isCurrent: () => ticket === epoch, force, save: (discovery, handled) => queued(async () => {
+    if (ticket === epoch) { await chrome.storage.local.set({ discovery }); return; }
+    if (handled && (await readSettings()).connections.some(c => c.owner.toLowerCase() === handled.owner)) {
+      const current = await readDiscovery();
+      mergeHandledDiscovery(current, handled);
+      await chrome.storage.local.set({ discovery: current });
+    }
+  }) });
+  result.errors.push(...discovered.errors);
+  if (discovered.errors.length) result.checkedAt = null;
+  if (discovered.retryAt) result.retryAt = Math.max(result.retryAt ?? 0, discovered.retryAt);
   await queued(async () => {
     if (ticket !== epoch) { rerun = true; return; }
     await chrome.storage.local.set({ connectionCaches: client.exportCaches(), connectionHealth: healthFromRun(await readHealth(), settings, result, Date.now()), status: { ...result, checkedAt: result.checkedAt ?? state.status.checkedAt, running: false } });
   });
 }
 
-function requestRun(): Promise<void> {
+function requestRun(force = false): Promise<void> {
+  forceDiscovery ||= force;
   rerun = true;
   if (running) return running;
   running = (async () => {
     await ready;
     while (rerun) {
       rerun = false;
-      try { await runOnce(); } catch (error) { await reportFailure(error); }
+      const force = forceDiscovery; forceDiscovery = false;
+      try { await runOnce(force); } catch (error) { await reportFailure(error); }
     }
   })().finally(() => { running = null; });
   return running;
@@ -91,7 +106,7 @@ async function handleMessage(message: unknown): Promise<unknown> {
   if (!message || typeof message !== 'object' || !('type' in message)) throw new Error('Invalid request.');
   const request = message as Record<string, unknown>;
   if (request.type === 'getState') return publicState();
-  if (request.type === 'refresh') { await requestRun(); return publicState(); }
+  if (request.type === 'refresh') { await requestRun(true); return publicState(); }
   if (['keepOpen', 'resumeCleanup', 'reopenClosed', 'clearRecent'].includes(String(request.type))) {
     // Protection takes effect on receipt, even while a slow credential check
     // holds the command queue. Every new reconciliation sees pending keys.
@@ -151,6 +166,14 @@ async function changeSettings(request: Record<string, unknown>, beforeSave?: () 
     const { caches } = await readRunState();
     values.cache = emptyCache(); values.status = emptyStatus();
     values.connectionCaches = request.type === 'disconnect' ? [] : caches.filter(c => c.owner !== owner.toLowerCase());
+    const discovery = await readDiscovery();
+    if (request.type === 'removeConnection') delete discovery[owner.toLowerCase()];
+    // Token replacement keeps handled PRs, but permits an immediate rescan.
+    if (request.type === 'setToken' && Object.hasOwn(discovery, owner.toLowerCase())) {
+      discovery[owner.toLowerCase()].attemptedAt = 0;
+      delete discovery[owner.toLowerCase()].error;
+    }
+    values.discovery = request.type === 'disconnect' ? {} : discovery;
   }
   if (request.type === 'disconnect' || request.type === 'removeConnection') await cancelImports(s => request.type === 'disconnect' || s.owner.toLowerCase() === owner.toLowerCase());
   if (request.type === 'disconnect' || request.type === 'removeConnection') values.connectionHealth = (await readHealth()).filter(h => request.type !== 'disconnect' && h.owner !== owner.toLowerCase());

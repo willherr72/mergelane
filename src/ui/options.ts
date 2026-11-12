@@ -242,7 +242,7 @@ function renderConnection(): HTMLElement {
   ignored.append(field('Additional accounts to ignore', 'ignoredLogins', accounts), el('p', 'helper', 'GitHub bots and PR authors are already ignored. Add automation that uses ordinary user accounts, one login per line.'));
   ignored.append(button('Save preferences', 'textbutton', () => { void save(); })); grid.append(credentials, ignored); section.append(grid);
   const enabling = el('div', 'settingrow'); enabling.style.marginTop = '24px';
-  const explanation = el('div'); explanation.append(el('span', 'fieldlabel', 'Automatic organization and cleanup'), el('p', '', 'Enabling also closes merged PR tabs and PRs closed for more than one hour.'));
+  const explanation = el('div'); explanation.append(el('span', 'fieldlabel', 'Automatic PR tabs and cleanup'), el('p', '', 'New PRs you create under connected owners open in background tabs after the first scan. Manually closed tabs stay closed. Enabling also closes merged PR tabs and PRs closed for more than one hour.'));
   const enable = button(draft.enabled ? 'Pause MergeLane' : 'Enable MergeLane', draft.enabled ? 'outline' : 'primary', () => { void toggleEnabled(); }); enable.disabled = !state.hasToken;
   enabling.append(explanation, enable); section.append(enabling); return section;
 }

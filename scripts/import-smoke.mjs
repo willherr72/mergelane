@@ -27,6 +27,7 @@ async function fixtures() {
       if (url.origin !== 'https://api.github.com') throw new Error('Unexpected fixture host');
       const json = value => new Response(JSON.stringify(value));
       if (url.pathname === '/user') return json({ login: 'fixture-user' });
+      if (url.pathname === '/issues') return json([]);
       const owner = url.pathname.split('/')[2];
       if (globalThis.__holdOwner === owner) {
         globalThis.__waitingForRelease = true;

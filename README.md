@@ -1,10 +1,10 @@
 # MergeLane
 
-A Chrome extension that groups open GitHub pull request tabs by workflow. Includes editable categories and conditions, native tab groups, a Material 2 settings page, and automatic cleanup of completed PR tabs.
+A Chrome extension that opens your new GitHub pull requests and groups PR tabs by workflow. Includes editable categories and conditions, native tab groups, a Material 2 settings page, and automatic cleanup of completed PR tabs.
 
 ## Install
 
-Download **mergelane-0.3.0.zip** from the [v0.3.0 release](https://github.com/willherr72/mergelane/releases/tag/v0.3.0) and extract it to a folder you will keep. The release ZIP contains the ready-to-load extension; GitHub's automatic source-code archives require building first.
+Download **mergelane-0.4.0.zip** from the [v0.4.0 release](https://github.com/willherr72/mergelane/releases/tag/v0.4.0) and extract it to a folder you will keep. The release ZIP contains the ready-to-load extension; GitHub's automatic source-code archives require building first.
 
 1. Open `chrome://extensions` in Chrome.
 2. Turn on **Developer mode**.
@@ -12,7 +12,7 @@ Download **mergelane-0.3.0.zip** from the [v0.3.0 release](https://github.com/wi
 4. In MergeLane's settings, connect a GitHub personal access token.
 5. Review your categories and click **Enable MergeLane**.
 
-The extension starts paused. It does not organize or close tabs until enabled. Pin MergeLane from Chrome's extensions menu for quick access to its popup.
+The extension starts paused. It does not open, organize, or close PR tabs until enabled. Pin MergeLane from Chrome's extensions menu for quick access to its popup.
 
 For updates, extract the new release into the same folder and click **Reload** on MergeLane's card in `chrome://extensions`. Do not open `options.html` directly from disk; its functionality requires the extension context.
 
@@ -59,6 +59,10 @@ Classification follows current facts. Removing a queue label or dismissing appro
 The settings UI uses softened Material 2 accents. Chrome controls the exact native tab-group colors.
 
 ## Tab behavior
+
+While enabled, MergeLane checks each connected owner's repositories for **new open PRs created by the account behind that connection's token**, about once a minute. The first successful scan establishes a baseline without opening a backlog. Subsequent discoveries open in background tabs in a focused normal browser window, or another normal window if needed, and enter the usual grouping flow. No incognito tabs or windows are managed. If no normal window exists, opening waits for a later scan.
+
+Already-open PRs, including loading tabs and subpages, are not duplicated. MergeLane remembers handled PRs across worker and browser restarts, so manually closing a PR tab leaves it closed. PRs created while paused are discovered after resuming. Removing a connection resets its discovery baseline; replacing its token preserves history unless the authenticated account changes. Migrated default connections still organize existing tabs; add an explicit owner connection to discover new PRs for that owner. **Refresh now** also requests discovery, respecting API retry windows.
 
 MergeLane tracks github.com PR pages and their subpages, such as files or commits. It deduplicates API checks for multiple tabs of the same PR. Tabs stay in their existing browser windows. Pinned PR tabs stay pinned and ungrouped.
 

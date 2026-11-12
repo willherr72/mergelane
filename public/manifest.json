@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "MergeLane",
   "description": "Organize GitHub pull request tabs by workflow and clear completed PRs.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "minimum_chrome_version": "120",
   "permissions": ["tabGroups", "storage", "alarms"],
   "host_permissions": ["https://github.com/*", "https://api.github.com/*"],

@@ -65,3 +65,33 @@ it('honors retry-after and rejects incomplete or malformed payloads', async () =
   const uncached = new GitHubClient('t', emptyCache(), async () => new Response(null, { status: 304 }));
   await expect(uncached.details(ref)).rejects.toThrow('cache');
 });
+
+const listedPr = (owner = 'org', login = 'me', number = 1) => ({ state: 'open', created_at: '2026-11-12T12:00:00Z', user: { login, type: 'User' }, pull_request: { html_url: `https://github.com/${owner}/repo/pull/${number}` }, body: 'private discovery body' });
+it('discovers only authored open PRs under the connected owner across all pages', async () => {
+  const cache = emptyCache(), requested: string[] = [];
+  const client = new GitHubClient('token', cache, async input => {
+    const url = new URL(String(input)); requested.push(url.href);
+    if (url.pathname === '/user') return json({ login: 'Me' });
+    expect(url.searchParams.get('filter')).toBe('created');
+    expect(url.searchParams.get('state')).toBe('open');
+    return url.searchParams.get('page') === '2' ? json([listedPr('ORG', 'me', 2)]) : json([
+      listedPr(), listedPr('other'), listedPr('org', 'someone'), { ...listedPr('org', 'me', 3), state: 'closed' }, { state: 'open' },
+    ], { link: '<https://api.github.com/issues?filter=created&state=open&per_page=100&page=2>; rel="next"' });
+  });
+  const found = await client.authoredPullRequests('org');
+  expect(found.login).toBe('Me');
+  expect(found.prs.map(pr => pr.key)).toEqual(['org/repo/1', 'org/repo/2']);
+  expect(found.prs[0].createdAt).toBe(Date.parse('2026-11-12T12:00:00Z'));
+  expect(requested).toHaveLength(3);
+  expect(JSON.stringify(cache)).not.toContain('private discovery body');
+});
+
+it.each(['https://evil.test/issues', 'https://api.github.com/user', 'https://api.github.com/issues?filter=all&state=open'])('rejects unsafe discovery pagination: %s', async next => {
+  const client = new GitHubClient('token', emptyCache(), async input => String(input).endsWith('/user') ? json({ login: 'me' }) : json([listedPr()], { link: `<${next}>; rel="next"` }));
+  await expect(client.authoredPullRequests('org')).rejects.toThrow('pagination');
+});
+
+it('rejects a malformed discovered PR instead of accepting a partial baseline', async () => {
+  const client = new GitHubClient('token', emptyCache(), async input => String(input).endsWith('/user') ? json({ login: 'me' }) : json([listedPr(), { ...listedPr(), created_at: 'invalid' }]));
+  await expect(client.authoredPullRequests('org')).rejects.toThrow('incomplete');
+});

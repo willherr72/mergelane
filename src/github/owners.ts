@@ -23,6 +23,7 @@ export class OwnerClient {
   }
   async snapshot(ref: PrRef) { return this.forOwner(ref.owner).snapshot(ref); }
   async details(ref: PrRef, fresh: boolean) { return this.forOwner(ref.owner).details(ref, fresh); }
+  async authoredPullRequests(owner: string) { return this.forOwner(owner).authoredPullRequests(owner); }
   exportCaches(): OwnerCache[] {
     return [...this.clients].map(([owner, client]) => { client.trimCache(); return { owner, cache: client.cache, retryAt: client.retryAt }; });
   }

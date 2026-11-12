@@ -19,7 +19,7 @@ context.on('page', page => page.on('pageerror', error => errors.push(error.messa
 await context.route('https://github.com/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Fixture PR</title><p>Isolated MergeLane smoke test. No live GitHub data.</p>' }));
 let worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
 const id = new URL(worker.url()).host;
-const fixtures = { labels: {}, merged: {}, closed: {} };
+const fixtures = { labels: {}, merged: {}, closed: {}, discovery: [90], created: { 90: '2020-01-01T00:00:00Z' } };
 
 async function installFixtures(data) {
   await worker.evaluate(data => {
@@ -33,6 +33,7 @@ async function installFixtures(data) {
         return json({ login: 'fixture-user' });
       }
       if (new Headers(init?.headers).get('Authorization') === 'Bearer wrong-owner-fixture') return new Response('', { status: 404 });
+      if (url.pathname === '/issues') return json(globalThis.__fixture.discovery.map(n => ({ state: 'open', user: { login: 'fixture-user', type: 'User' }, created_at: globalThis.__fixture.created[n], pull_request: { html_url: `https://github.com/org/repo/pull/${n}` } })));
       const match = url.pathname.match(/\/(pulls|issues)\/(\d+)(.*)$/);
       if (!match) throw new Error('Unexpected fixture path');
       const n = Number(match[2]), tail = match[3];
@@ -40,7 +41,7 @@ async function installFixtures(data) {
       if (!tail) {
         const merged = globalThis.__fixture.merged[n] ?? n === 5;
         const closed = globalThis.__fixture.closed[n] ?? (n === 6 ? 7200000 : n === 7 ? 1800000 : null);
-        return json({ state: merged || closed !== null ? 'closed' : 'open', merged, closed_at: closed !== null ? new Date(Date.now() - closed).toISOString() : merged ? new Date().toISOString() : null, draft: false, user: person('author'), labels: (globalThis.__fixture.labels[n] ?? (n === 4 ? ['mergify-queue'] : [])).map(name => ({ name })), title: `Fixture PR ${n}` });
+        return json({ state: merged || closed !== null ? 'closed' : 'open', merged, closed_at: closed !== null ? new Date(Date.now() - closed).toISOString() : merged ? new Date().toISOString() : null, draft: false, user: person(n >= 90 ? 'fixture-user' : 'author'), labels: (globalThis.__fixture.labels[n] ?? (n === 4 ? ['mergify-queue'] : [])).map(name => ({ name })), title: `Fixture PR ${n}` });
       }
       if (match[1] === 'issues' && tail === '/comments') return json(n === 2 ? [{ user: person('alice') }] : [{ user: person('author') }, { user: { login: 'supabase[bot]', type: 'Bot' } }]);
       if (tail === '/reviews') return json([3, 4, 8].includes(n) ? [{ id: n, state: n === 8 ? 'CHANGES_REQUESTED' : 'APPROVED', submitted_at: '2026-11-10T12:00:00Z', user: person('reviewer') }] : []);
@@ -111,6 +112,10 @@ try {
   await options.getByRole('button', { name: 'Enable MergeLane', exact: true }).click();
   await options.locator('#toast').filter({ hasText: 'Settings saved' }).waitFor();
   checks.push('Token setup validates the account, clears the input, and requires explicit enable.');
+  await send('refresh');
+  assert.equal((await worker.evaluate(() => chrome.tabs.query({}))).some(t => t.url?.endsWith('/pull/90')), false);
+  assert.ok(await worker.evaluate(async () => (await chrome.storage.local.get('discovery')).discovery.org.baselineAt));
+  checks.push('First discovery scan establishes a baseline without opening older authored PRs.');
 
   await worker.evaluate(async () => {
     for (let n = 1; n <= 7; n++) await chrome.tabs.create({ url: `https://github.com/org/repo/pull/${n}`, active: false });
@@ -286,6 +291,56 @@ try {
   checks.push('Options and popup load without page errors; narrow options layout has no horizontal overflow.');
   const final = await send('getState'); assert.deepEqual(final.status.errors, []);
 
+  const activeBeforeDiscovery = (await worker.evaluate(() => chrome.tabs.query({ active: true }))).map(t => t.id).sort();
+  await worker.evaluate(() => {
+    globalThis.__fixture.discovery.push(91);
+    globalThis.__fixture.created[91] = new Date().toISOString();
+  });
+  await send('refresh'); await waitForTabs(); await send('refresh');
+  const discoveredTabs = (await worker.evaluate(() => chrome.tabs.query({}))).filter(t => t.url === 'https://github.com/org/repo/pull/91');
+  assert.equal(discoveredTabs.length, 1); assert.equal(discoveredTabs[0].active, false); assert.notEqual(discoveredTabs[0].groupId, -1);
+  assert.deepEqual((await worker.evaluate(() => chrome.tabs.query({ active: true }))).map(t => t.id).sort(), activeBeforeDiscovery);
+  await worker.evaluate(id => chrome.tabs.remove(id), discoveredTabs[0].id);
+  await send('refresh');
+  assert.equal((await worker.evaluate(() => chrome.tabs.query({}))).some(t => t.url?.endsWith('/pull/91')), false);
+  checks.push('New authored PRs open exactly once in background tabs, are grouped, preserve focus, and stay closed after manual dismissal.');
+
+  await worker.evaluate(() => {
+    globalThis.__fixture.discovery.push(93);
+    globalThis.__fixture.created[93] = new Date().toISOString();
+    const create = chrome.tabs.create.bind(chrome.tabs);
+    chrome.tabs.create = async properties => {
+      const tab = await create(properties);
+      if (properties.url?.endsWith('/pull/93')) {
+        chrome.tabs.create = create;
+        globalThis.__creationWaiting = true;
+        await new Promise(resolve => { globalThis.__releaseCreation = resolve; });
+      }
+      return tab;
+    };
+  });
+  const pausedCreation = send('refresh');
+  await waitWorker(() => !!globalThis.__creationWaiting);
+  await send('setEnabled', { enabled: false });
+  await worker.evaluate(() => globalThis.__releaseCreation());
+  await pausedCreation; await waitForTabs();
+  assert.ok(await worker.evaluate(async () => (await chrome.storage.local.get('discovery')).discovery.org.seen.includes('org/repo/93')));
+  await worker.evaluate(async () => {
+    const tab = (await chrome.tabs.query({})).find(t => t.url?.endsWith('/pull/93'));
+    await chrome.tabs.remove(tab.id);
+  });
+  await send('setEnabled', { enabled: true }); await send('refresh');
+  assert.equal((await worker.evaluate(() => chrome.tabs.query({}))).some(t => t.url?.endsWith('/pull/93')), false);
+  checks.push('Pausing during native tab creation preserves its handled record, so closing it while paused does not reopen it on resume.');
+
+  await send('setEnabled', { enabled: false }); await send('refresh');
+  await worker.evaluate(() => {
+    globalThis.__fixture.discovery.push(92);
+    globalThis.__fixture.created[92] = new Date().toISOString();
+  });
+  await send('refresh');
+  assert.equal((await worker.evaluate(() => chrome.tabs.query({}))).some(t => t.url?.endsWith('/pull/92')), false);
+
   const restartFixtures = await worker.evaluate(() => globalThis.__fixture);
   await send('setEnabled', { enabled: false }); await send('refresh');
   await context.close();
@@ -300,6 +355,11 @@ try {
   assert.ok(restored.cleanup.recent.some(pr => pr.key === 'org/repo/5'));
   await send('reopenClosed', { key: 'org/repo/5' }); await waitForTabs();
   await send('setEnabled', { enabled: true }); await send('refresh');
+  await waitForTabs(); await send('refresh');
+  const resumedTabs = await worker.evaluate(() => chrome.tabs.query({}));
+  assert.equal(resumedTabs.some(t => t.url?.endsWith('/pull/91')), false);
+  assert.equal(resumedTabs.filter(t => t.url?.endsWith('/pull/92')).length, 1);
+  checks.push('Discovery history survives a browser restart; resuming discovers PRs created during pause without reopening manually dismissed tabs.');
   assert.equal((await worker.evaluate(() => chrome.tabs.query({}))).some(t => t.url === 'https://github.com/org/repo/pull/5'), true);
   checks.push('A full browser restart preserves cleanup protections and recent history, and restored protection still prevents closure.');
   popup = await context.newPage(); await popup.goto(`chrome-extension://${id}/popup.html`);

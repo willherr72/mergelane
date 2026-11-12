@@ -7,6 +7,12 @@ import type { ConnectionCheck } from './github/connection';
 import type { OwnerCache } from './github/owners';
 import { emptyCleanup, type CleanupState } from './core/cleanup';
 import type { ConnectionHealth } from './core/health';
+import type { DiscoveryState } from './background/discovery';
+
+export async function readDiscovery(): Promise<DiscoveryState> {
+  const { discovery } = await chrome.storage.local.get<{ discovery?: DiscoveryState }>('discovery');
+  return discovery ?? {};
+}
 
 export async function readCleanup(): Promise<CleanupState> {
   const { cleanup } = await chrome.storage.local.get<{ cleanup?: CleanupState }>('cleanup');
